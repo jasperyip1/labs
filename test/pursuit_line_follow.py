@@ -87,14 +87,19 @@ CY            = 240.0    # principal point y (480-tall image)
 MIN_AGL_M     = 0.30     # floor on altitude used for the pixel->meter scale
 
 # -- Steering (look-ahead yaw + light strafe), physical units ----------------
-K_PSI         = 2.0      # yaw rate (rad/s) per rad of heading error to the carrot  (TUNE FIRST)
+K_PSI         = 0.2      # yaw rate (rad/s) per rad of heading error to the carrot  (TUNE FIRST)
 YAW_RATE_MAX  = 2.0      # rad/s cap on yaw
+<<<<<<< Updated upstream
 PSI_SLOW      = 0.70     # heading error (rad, ~40 deg) at which forward eases toward its minimum
 TAU_PSI       = 0.20     # s: low-pass time constant on the heading error (kills per-frame jitter)
 PIVOT_ENTER   = 1.10     # rad (~63 deg): sustained heading error needed to START pivoting in place
 PIVOT_EXIT    = 0.80     # rad (~46 deg): heading error to STOP pivoting (hysteresis -> no chatter)
 PIVOT_MIN_ARC_PX = 140   # px: only pivot when at least this much line has been traced; a short,
                          # noisy trace (small line high up) can't be trusted to be a real hairpin
+=======
+PSI_SLOW      = 0.70     # heading error (rad, ~40 deg) at which forward hits its minimum
+PIVOT_PSI     = 2.0     # heading error (rad, ~60 deg) above which the drone pivots in place
+>>>>>>> Stashed changes
 K_LAT         = 1.2      # strafe (m/s) per meter of lateral offset under the drone
 V_STRAFE_MAX  = 0.40     # m/s cap on strafe
 
@@ -105,7 +110,7 @@ V_TURN_MIN    = 0.10     # m/s floor for a sharp turn when NOT pivoting -- keep 
                          # the drone arcs around the bend instead of dead-stopping (which oscillates)
 
 # -- Altitude & run ----------------------------------------------------------
-TARGET_HEIGHT  = 1.0        # meters above launch ground
+TARGET_HEIGHT  = 5.0        # meters above launch ground
 FOLLOW_TIME    = 1000000.0   # seconds to follow before landing
 LOST_YAW_DECAY = 0.6         # keep turning toward the last-seen side while the line is lost
 

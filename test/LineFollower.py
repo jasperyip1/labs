@@ -29,25 +29,33 @@ MAX_YAW       = 1.0     # yaw authority
 FOLLOW_TIME   = 1000000.0     # seconds to follow before landing
 IMAGE_CENTER  = 320      # 640-wide image -> center column
 
-PITCH_STRAIGHT = 0.3    # fast on straights
+PITCH_STRAIGHT = 0.8    # fast on straights
 PITCH_TURN     = 0.2    # slow through turns
-CURVE_SCALE    = 80    # residual std at which you're "fully" in a turn (TUNE)
+CURVE_SCALE    = 27   # residual std at which you're "fully" in a turn (TUNE)
 
 # -- PID gains --------------------------------------------------------------
 # KP values below reproduce your original proportional-only behavior exactly
 # when KI and KD are 0. Tune KD up first (damps the weave), then KI only if
 # the drone settles consistently off-center.
-YAW_KP      = 1.2
+YAW_KP      = 1.0
 YAW_KI      = 0.0
-YAW_KD      = 0.05
+YAW_KD      = 0.1
 YAW_I_LIMIT = 0.30      # cap on the integral's contribution to yaw
 
-ROLL_KP      = 0.3      # was MAX_ROLL used as the gain
+ROLL_KP      = 0.2      # was MAX_ROLL used as the gain
 ROLL_KI      = 0.0
-ROLL_KD      = 0.02
+ROLL_KD      = 0.15
 ROLL_I_LIMIT = 0.10
 
 D_TAU = 0.10    # derivative low-pass time constant, seconds (bigger = smoother)
+
+# -- Line-search climb -------------------------------------------------------
+MAX_CLIMB        = 3    # meters above launch height to search (TUNE)
+CLIMB_THROTTLE   = 0.3    # send_pcmd throttle while searching
+DESCEND_THROTTLE = -0.2   # gentler than the climb on purpose
+LOST_GRACE       = 0.4    # seconds of no-line before climbing
+FOUND_GRACE      = 0.5    # seconds of line before committing to descend
+HEIGHT_TOL       = 0.10   # meters; "back at base height"
 
 
 # -- PID controller ---------------------------------------------------------
@@ -116,15 +124,25 @@ class PID:
 # -- Module-level state -----------------------------------------------------
 _timer = 0.0
 _done  = False
+FOLLOWING, SEARCHING, DESCENDING = "FOLLOWING", "SEARCHING", "DESCENDING"
+
+_state     = FOLLOWING
+_base_alt  = None
+_visible   = True
+_vis_timer = 0.0
 
 _yaw_pid  = PID(YAW_KP,  YAW_KI,  YAW_KD,  MAX_YAW,  YAW_I_LIMIT)
 _roll_pid = PID(ROLL_KP, ROLL_KI, ROLL_KD, MAX_ROLL, ROLL_I_LIMIT)
 
 
 def reset():
-    global _timer, _done
+    global _timer, _done, _state, _base_alt, _visible, _vis_timer
     _timer = 0.0
     _done  = False
+    _state     = FOLLOWING
+    _base_alt  = None
+    _visible   = True
+    _vis_timer = 0.0
     _yaw_pid.reset()
     _roll_pid.reset()
 
@@ -168,13 +186,56 @@ def set_roll(xs, dt):
 def set_pitch(ys, xs, m, b):
     """Fly fast when the edge fits a straight line, slow when it curves."""
     curviness = np.std(xs - (m * ys + b))
+    print(curviness)
     straightness = uav_utils.clamp(1.0 - curviness / CURVE_SCALE, 0.0, 1.0)
     return PITCH_TURN + (PITCH_STRAIGHT - PITCH_TURN) * straightness
 
 
-def set_throttle():
-    """Hold altitude; the launcher already put us at the right height."""
-    return 0
+def set_throttle(drone, fit, dt):
+    """
+    Climb to look for a lost edge, then descend back to the launch height
+    once it's reacquired. Returns a send_pcmd throttle value.
+    """
+    global _state, _base_alt, _visible, _vis_timer
+
+    alt = drone.physics.get_altitude()
+    if _base_alt is None:
+        _base_alt = alt
+
+    visible = fit is not None
+    if visible != _visible:
+        _visible   = visible
+        _vis_timer = 0.0
+    else:
+        _vis_timer += dt
+
+    lost_confirmed  = (not _visible) and _vis_timer >= LOST_GRACE
+    found_confirmed = _visible and _vis_timer >= FOUND_GRACE
+
+    if _state == FOLLOWING:
+        if lost_confirmed:
+            _state = SEARCHING
+            return CLIMB_THROTTLE
+        return 0.0
+
+    if _state == SEARCHING:
+        if found_confirmed:
+            _state = DESCENDING
+            return DESCEND_THROTTLE
+        if alt - _base_alt >= MAX_CLIMB:
+            return 0.0                      # ceiling: hover and keep looking
+        return CLIMB_THROTTLE
+
+    if _state == DESCENDING:
+        if lost_confirmed:
+            _state = SEARCHING
+            return CLIMB_THROTTLE
+        if alt <= _base_alt + HEIGHT_TOL:
+            _state = FOLLOWING
+            return 0.0
+        return DESCEND_THROTTLE
+
+    return 0.0
 
 
 # -- Main loop --------------------------------------------------------------
@@ -182,26 +243,20 @@ def update(drone):
     global _timer, _done
     if _done:
         return True
-    ##################################
-    #### START PUT CODE HERE #########
-
-    dt = drone.get_delta_time()
+    dt  = drone.get_delta_time()
     fit = find_edge(drone)
+    throttle = set_throttle(drone, fit, dt)
 
     if fit is None:
-        drone.flight.stop()
         _yaw_pid.hold()
         _roll_pid.hold()
+        drone.flight.send_pcmd(0.0, 0.0, 0.0, throttle)   # hold level, climb
     else:
         ys, xs, m, b = fit
-
-        pitch    = set_pitch(ys, xs, m, b)
-        roll     = set_roll(xs, dt)
-        yaw      = set_yaw(m, dt)
-        throttle = set_throttle()
-
+        pitch = set_pitch(ys, xs, m, b)
+        roll  = set_roll(xs, dt)
+        yaw   = set_yaw(m, dt)
         drone.flight.send_pcmd(pitch, roll, yaw, throttle)
-        print("pitch:",pitch,"roll: ", roll, "yaw: ", yaw)
 
     _timer += dt
     if _timer >= FOLLOW_TIME:
@@ -214,7 +269,7 @@ def update(drone):
 
 if __name__ == "__main__":
     _drone = drone_core.create_drone()
-    _launcher = neo_lab.Launcher(1.0)
+    _launcher = neo_lab.Launcher(1)
 
     def start():
         _launcher.reset()

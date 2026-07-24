@@ -150,7 +150,7 @@ def update(drone):
 
 def update_slow(drone):
     """
-    Called periodically (e.g. every 0.2 seconds) to print debug information
+    Called periodically to print debug information
     without spamming the terminal every frame.
     """
     if not _has_line:

@@ -28,7 +28,7 @@ MAX_ROLL      = 0.3     # strafe authority for centering
 FOLLOW_TIME   = 1000000.0     # seconds to follow before landing
 IMAGE_CENTER  = 320      # 640-wide image -> center column
 # add near your other constants
-PITCH_STRAIGHT = 0.3    # fast on straights
+PITCH_STRAIGHT = 0.5    # fast on straights
 PITCH_TURN     = 0.2    # slow through turns
 CURVE_SCALE    = 50    # residual std at which you're "fully" in a turn (TUNE)
 
@@ -105,7 +105,7 @@ def update(drone):
 
 if __name__ == "__main__":
     _drone = drone_core.create_drone()
-    _launcher = neo_lab.Launcher(0.85)
+    _launcher = neo_lab.Launcher(1.0)
 
     def start():
         _launcher.reset()

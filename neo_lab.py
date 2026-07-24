@@ -148,7 +148,7 @@ def world_position(drone):
 # error into tilt -- the job the real flight controller does in hardware. Writing the labs
 # against send_velocity keeps the student controller identical across sim and real.
 
-REAL_MAX_SPEED = 0.5     # m/s mapped to a full normalized command; MUST match mux.yaml max_speed
+REAL_MAX_SPEED = 1.0     # m/s mapped to a full normalized command; MUST match mux.yaml max_speed
 _SIM_VEL_KP = 0.3        # sim inner loop: tilt per (m/s) of horizontal velocity error
 _SIM_VZ_MPS = 12.0       # sim throttle scale: ~12 m/s of vertical velocity per unit throttle
 _SIM_TILT_LIMIT = 0.5   # keep tilt gentle: the sim's attitude response is fast and high-authority

@@ -36,15 +36,16 @@ _wp = 0
 _done = False
 
 def reset():
-    global _x, _z, _wp, _done
+    global _x, _y, _z, _wp, _done
     _x = 0.0
+    _y = 0.0
     _z = 0.0
     _wp = 0
     _done = False
 
 
 def update(drone):
-    global _x, _z, _wp, _done
+    global _x, _y, _z, _wp, _done
     if _done:
         return True
     ##################################
@@ -61,6 +62,23 @@ def update(drone):
     # each position error becomes a target speed (gain KP_POS), height held by
     # neo_lab.altitude_hold_velocity, all three sent with send_velocity. When within WP_TOL
     # of the corner on both axes, advance _wp += 1.
+
+    vx, vy, vz = drone.physics.get_linear_velocity()
+    _x += vx * drone.get_delta_time()
+    _y += vy * drone.get_delta_time()
+    _z += vz * drone.get_delta_time()
+    v_right = (WAYPOINTS[_wp][0] - _x) * KP_POS
+    v_forward = (WAYPOINTS[_wp][1] - _z) * KP_POS
+    v_up = neo_lab.altitude_hold_velocity(drone, TARGET_HEIGHT)
+    neo_lab.send_velocity(drone, v_right, v_up, v_forward)
+    speed = (vx**2 + vy**2 + vz**2)**0.5
+    if abs(WAYPOINTS[_wp][0] - _x) < WP_TOL and abs(WAYPOINTS[_wp][1] - _z) < WP_TOL:
+        _wp += 1
+        if _wp >= len(WAYPOINTS):
+            print(f"Arrived at final waypoint ({_x}, {neo_lab.height(drone)}, {_z})")
+            _done = True
+    else:
+        _hold = 0.0
 
     ###### END PUT CODE HERE #########
     ##################################

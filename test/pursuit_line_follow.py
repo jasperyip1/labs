@@ -27,9 +27,11 @@ traced centerline. On a straight line it is dead ahead (~0 heading error); at a 
 partway around the bend, so the heading error grows and the drone turns to follow it.
 
 Control (metric): project the carrot to a ground point with the pinhole model (offset =
-pixel_offset / FOCAL_PX * altitude), steer YAW RATE by the true heading angle to it, ease
-FORWARD speed as the angle grows, and PIVOT IN PLACE on the tightest bends. A light STRAFE
-keeps the body over the line. Gains are physical, so there is little to tune (K_PSI, V_CRUISE).
+pixel_offset / FOCAL_PX * altitude), steer YAW RATE by the heading angle to it, ease FORWARD
+speed continuously as the angle grows, and PIVOT IN PLACE only on a sustained, well-traced tight
+bend. The heading is low-pass filtered and the pivot is hysteretic and gated on how much line was
+actually traced, so a small, noisy line high in the frame stays stable instead of stutter-
+pivoting. A light STRAFE keeps the body over the line. Gains are physical (K_PSI, V_CRUISE).
 
 Detection uses neo_lab.line_mask (HSV brightness), which works the same in the sim and on the
 real LED-strip line. Command path: drone.flight.send_body_velocity(v_forward, v_right, v_up,
@@ -75,6 +77,8 @@ MIN_SLAB_PX   = 8        # line pixels a cross-section needs to keep crawling
 MAX_STEPS     = 26       # cap on traced path length
 DIR_SMOOTH    = 0.55     # 0..1 how fast the tangent turns (higher rounds sharper bends)
 LOOKAHEAD_M   = 0.35     # meters of arc-length AHEAD of the drone (nadir) to place the carrot
+LOOKAHEAD_MIN_PX = 90    # floor on the look-ahead in PIXELS: keeps the carrot far enough ahead for
+                         # a stable bearing when the line is small in the image (high altitude)
 
 # -- Camera / ground projection (pinhole, downward camera) -------------------
 FOCAL_PX      = 320.0    # camera focal length in pixels (approx; matches module5 distance est.)
@@ -85,14 +89,20 @@ MIN_AGL_M     = 0.30     # floor on altitude used for the pixel->meter scale
 # -- Steering (look-ahead yaw + light strafe), physical units ----------------
 K_PSI         = 2.0      # yaw rate (rad/s) per rad of heading error to the carrot  (TUNE FIRST)
 YAW_RATE_MAX  = 2.0      # rad/s cap on yaw
-PSI_SLOW      = 0.70     # heading error (rad, ~40 deg) at which forward hits its minimum
-PIVOT_PSI     = 1.05     # heading error (rad, ~60 deg) above which the drone pivots in place
+PSI_SLOW      = 0.70     # heading error (rad, ~40 deg) at which forward eases toward its minimum
+TAU_PSI       = 0.20     # s: low-pass time constant on the heading error (kills per-frame jitter)
+PIVOT_ENTER   = 1.10     # rad (~63 deg): sustained heading error needed to START pivoting in place
+PIVOT_EXIT    = 0.80     # rad (~46 deg): heading error to STOP pivoting (hysteresis -> no chatter)
+PIVOT_MIN_ARC_PX = 140   # px: only pivot when at least this much line has been traced; a short,
+                         # noisy trace (small line high up) can't be trusted to be a real hairpin
 K_LAT         = 1.2      # strafe (m/s) per meter of lateral offset under the drone
 V_STRAFE_MAX  = 0.40     # m/s cap on strafe
 
 # -- Forward speed (auto-eases in turns; no separate curvature gain) ---------
 V_CRUISE      = 0.6      # m/s on straights
-V_FWD_MIN     = 0.20     # m/s held through a moderate turn (0 once pivoting)
+V_FWD_MIN     = 0.20     # m/s at a moderate turn (PSI_SLOW)
+V_TURN_MIN    = 0.10     # m/s floor for a sharp turn when NOT pivoting -- keep crawling forward so
+                         # the drone arcs around the bend instead of dead-stopping (which oscillates)
 
 # -- Altitude & run ----------------------------------------------------------
 TARGET_HEIGHT  = 1.0        # meters above launch ground
@@ -103,13 +113,17 @@ LOST_YAW_DECAY = 0.6         # keep turning toward the last-seen side while the 
 _timer    = 0.0
 _done     = False
 _last_yaw = 0.0          # remembered yaw rate, so a briefly-lost line keeps turning the right way
+_psi_filt = 0.0          # low-pass filtered heading error (radians)
+_pivoting = False        # hysteretic pivot-in-place state
 
 
 def reset():
-    global _timer, _done, _last_yaw
+    global _timer, _done, _last_yaw, _psi_filt, _pivoting
     _timer    = 0.0
     _done     = False
     _last_yaw = 0.0
+    _psi_filt = 0.0
+    _pivoting = False
 
 
 # -- Centerline path tracer -------------------------------------------------
@@ -198,7 +212,7 @@ def look_ahead(path, meters_per_px):
     drone) is what keeps a straight line reading as ~0 heading error. Falls back to the
     farthest-ahead traced point when the path does not reach the full look-ahead."""
     ni = min(range(len(path)), key=lambda i: abs(path[i][0] - CY))
-    look_px = LOOKAHEAD_M / meters_per_px
+    look_px = max(LOOKAHEAD_M / meters_per_px, LOOKAHEAD_MIN_PX)
     acc = 0.0
     for i in range(ni + 1, len(path)):
         acc += math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1])
@@ -213,9 +227,15 @@ def _ground_offset(row, col, meters_per_px):
     return (CY - row) * meters_per_px, (col - CX) * meters_per_px
 
 
+def _path_arc(path):
+    """Total traced length in pixels — a confidence measure (a longer trace = more line seen)."""
+    return sum(math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1])
+               for i in range(1, len(path)))
+
+
 # -- Main loop --------------------------------------------------------------
 def update(drone):
-    global _timer, _done, _last_yaw
+    global _timer, _done, _last_yaw, _psi_filt, _pivoting
     if _done:
         return True
 
@@ -232,6 +252,8 @@ def update(drone):
         # Lost, or too little line to know its direction: hold height, decay the last yaw so the
         # drone keeps rotating toward where the line went, and strafe to sit over the seed if any.
         _last_yaw *= LOST_YAW_DECAY
+        _psi_filt *= LOST_YAW_DECAY
+        _pivoting = False
         v_right = 0.0
         if path:
             _, near_right = _ground_offset(path[0][0], path[0][1], mpp)
@@ -242,26 +264,45 @@ def update(drone):
         fwd_L, right_L = _ground_offset(carrot[0], carrot[1], mpp)
         _, near_right  = _ground_offset(near[0], near[1], mpp)
 
-        # Yaw: true heading angle to the carrot along the traced centerline (rounds bends/hairpins).
-        psi_err = math.atan2(right_L, fwd_L)                       # rad; + = carrot to the right
-        yaw_rate = uav_utils.clamp(K_PSI * psi_err, -YAW_RATE_MAX, YAW_RATE_MAX)
+        # Heading to the carrot, LOW-PASS FILTERED over time. Pixel-level jitter (worst when the
+        # line is small in the image, i.e. high up) would otherwise fling the yaw around and keep
+        # tripping the pivot; the filter turns that into a smooth, stable command.
+        raw_psi = math.atan2(right_L, fwd_L)                       # rad; + = carrot to the right
+        alpha = dt / (TAU_PSI + dt) if dt > 0.0 else 1.0
+        _psi_filt += alpha * (raw_psi - _psi_filt)
+        af = abs(_psi_filt)
 
-        # Forward: cruise when aimed straight, ease to V_FWD_MIN as the turn sharpens, and pivot
-        # in place (forward -> 0) once the required turn is very tight, to swing around the bend.
-        if abs(psi_err) > PIVOT_PSI:
+        # Pivot in place only for a SUSTAINED, well-traced sharp turn: hysteresis (enter high, exit
+        # low) stops chatter, and a minimum traced length stops a short/noisy trace high up from
+        # ever forcing a pivot.
+        arc_px = _path_arc(path)
+        if _pivoting:
+            _pivoting = af > PIVOT_EXIT
+        elif af > PIVOT_ENTER and arc_px >= PIVOT_MIN_ARC_PX:
+            _pivoting = True
+
+        yaw_rate = uav_utils.clamp(K_PSI * _psi_filt, -YAW_RATE_MAX, YAW_RATE_MAX)
+
+        # Forward speed: a CONTINUOUS ramp (no hard jump). Cruise when aimed straight, ease to
+        # V_FWD_MIN by PSI_SLOW and down to the crawl floor V_TURN_MIN for sharp turns -- it keeps
+        # moving so it ARCS around the bend. It drops to a true 0 (pivot in place) only when the
+        # gated/hysteretic pivot is engaged, i.e. a real, well-traced hairpin.
+        if _pivoting:
             v_forward = 0.0
+        elif af <= PSI_SLOW:
+            v_forward = V_CRUISE + (V_FWD_MIN - V_CRUISE) * (af / PSI_SLOW)
         else:
-            straightness = uav_utils.clamp(1.0 - abs(psi_err) / PSI_SLOW, 0.0, 1.0)
-            v_forward = V_FWD_MIN + (V_CRUISE - V_FWD_MIN) * straightness
+            t = min((af - PSI_SLOW) / (PIVOT_ENTER - PSI_SLOW), 1.0)
+            v_forward = V_FWD_MIN + (V_TURN_MIN - V_FWD_MIN) * t
 
         # Strafe: center the body over the line (residual lateral offset, in meters).
         v_right = uav_utils.clamp(K_LAT * near_right, -V_STRAFE_MAX, V_STRAFE_MAX)
 
         _last_yaw = yaw_rate
         drone.flight.send_body_velocity(v_forward, v_right, v_up, yaw_rate)
-        print(f"path={len(path):2d} carrot fwd={fwd_L:+.2f}m right={right_L:+.2f}m "
-              f"psi={math.degrees(psi_err):+6.1f}deg | v_fwd={v_forward:.2f} "
-              f"v_right={v_right:+.2f} yaw={yaw_rate:+.2f}rad/s{'  PIVOT' if v_forward == 0.0 else ''}")
+        print(f"path={len(path):2d} arc={arc_px:3.0f}px psi={math.degrees(raw_psi):+6.1f}"
+              f"->{math.degrees(_psi_filt):+6.1f}deg | v_fwd={v_forward:.2f} "
+              f"v_right={v_right:+.2f} yaw={yaw_rate:+.2f}rad/s{'  PIVOT' if _pivoting else ''}")
 
     _timer += dt
     if _timer >= FOLLOW_TIME:

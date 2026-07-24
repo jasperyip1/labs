@@ -7,34 +7,33 @@ An aggressive, low-tuning rewrite of velocity_line_follow.py that follows the li
 connected PATH, so it handles sharp bends and hairpins (line enters and exits the bottom of
 the frame) instead of getting confused by them. Tuned in physical units (m/s, rad/s, meters).
 
-Why per-band centroids fail on a hairpin
-----------------------------------------
-The simpler approach (fit one line, or take a mean column per horizontal band) assumes each
-band holds ONE piece of line. On a U-turn the lower bands cross BOTH legs, so the mean column
-lands in the empty gap between them ("phantom center"), and the top band sits on the apex, so
-the look-ahead shows ~zero heading error and the drone drives straight over the bend.
+Two things this has to get right
+--------------------------------
+1. CENTERLINE, not one edge. A thick line (or a line whose fill isn't bright, so only its two
+   edges show up in the mask) must be followed down its MIDDLE. A least-squares line fit does
+   this for free (the fit lands between the two edges); a naive path tracer instead locks onto
+   ONE edge and, when both edges are in view (e.g. at altitude), flips between them and weaves.
+   So at every step this samples the line's cross-section PERPENDICULAR to its own direction and
+   takes the mean -> the centerline, averaging the two edges together.
+2. HAIRPINS. A single line fit cannot represent a line that doubles back (enters and exits the
+   bottom). So instead of fitting once, this TRACES the line: seed at the line under the drone,
+   then crawl along the local tangent, re-centering on the cross-section each step. Because the
+   crawl follows the tangent it rounds the apex and continues down the other leg; because the
+   cross-section window is local, it averages the line's own width but NOT a far-away leg.
 
-What this does instead: TRACE the line as a path
-------------------------------------------------
-1. Seed at the line cluster nearest bottom-center (the leg the drone is currently over).
-2. Crawl along the line's local TANGENT with a small sliding window: step forward, take the
-   window's bright centroid (weighted toward the predicted point so it stays on the current
-   leg), update the direction from the last two points, repeat. Because it follows the tangent
-   it ROUNDS the apex and continues down the other leg — it doesn't jump the gap or average
-   the two legs together.
-3. The carrot is the point a fixed arc-length AHEAD of the drone (measured from the nadir, the
-   image center, since the bottom of the frame is actually BEHIND a downward camera) along that
-   traced path. On a straight line the carrot is dead ahead (~0 heading error); at a hairpin it
-   is partway around the bend, so the heading error grows and the drone turns to follow it.
+The carrot is the point a fixed arc-length AHEAD of the drone (measured from the nadir, the
+image center, since the bottom of a downward frame is actually BEHIND the drone) along the
+traced centerline. On a straight line it is dead ahead (~0 heading error); at a hairpin it is
+partway around the bend, so the heading error grows and the drone turns to follow it.
 
-Control (unchanged, metric): project the carrot to a ground point with the pinhole model
-(downward camera, offset = pixel_offset / FOCAL_PX * altitude), steer YAW RATE by the true
-heading angle to it, ease FORWARD speed as the angle grows, and on the tightest bends PIVOT
-IN PLACE (forward -> 0, yaw dominates) to swing around the hairpin. A light STRAFE keeps the
-body over the line. Gains are physical, so there is little to tune (start with K_PSI, V_CRUISE).
+Control (metric): project the carrot to a ground point with the pinhole model (offset =
+pixel_offset / FOCAL_PX * altitude), steer YAW RATE by the true heading angle to it, ease
+FORWARD speed as the angle grows, and PIVOT IN PLACE on the tightest bends. A light STRAFE
+keeps the body over the line. Gains are physical, so there is little to tune (K_PSI, V_CRUISE).
 
-Command path: drone.flight.send_body_velocity(v_forward, v_right, v_up, yaw_rate) — the SI
-body-velocity setpoint (true m/s and rad/s, no [-1,1] normalization).
+Detection uses neo_lab.line_mask (HSV brightness), which works the same in the sim and on the
+real LED-strip line. Command path: drone.flight.send_body_velocity(v_forward, v_right, v_up,
+yaw_rate) -- the SI body-velocity setpoint (true m/s and rad/s, no [-1,1] normalization).
 """
 
 import math
@@ -53,19 +52,28 @@ if _d not in _sys.path:
     _sys.path.insert(0, _d)
 import neo_lab
 
-# -- Perception: brightness + path tracer -----------------------------------
-V_MIN         = 200      # brightness threshold for the glowing line (bright_mask)
-MIN_TOTAL_PX  = 120      # below this many bright pixels, treat the line as lost
+# -- Perception: line mask + centerline path tracer -------------------------
+# neo_lab.line_mask isolates the line by HSV brightness (works in the sim and on the real LED
+# strip; morphology bridges LED gaps and a thin line's two edges). The tracer below then follows
+# the line's CENTERLINE, so two bright edges never make it weave.
+V_MIN         = 200      # HSV Value threshold: bright LED strip (real) / bright line pixels (sim)
+MIN_TOTAL_PX  = 120      # below this many line pixels, treat the line as lost
 
+# Seed (where the drone currently sits on the line).
 SEED_BAND_FRAC = 0.18    # bottom fraction of the frame used to seed the trace
-SEED_MIN_PX    = 20      # bright pixels needed in the seed band
-SEED_RADIUS    = 40      # px around the anchor to average into the seed point
+SEED_MIN_PX    = 20      # line pixels needed to seed
+SEED_PERP      = 55      # px: half-window that gathers the line's FULL width (both edges) into the
+                         # seed centerline. Must EXCEED the line's pixel width, yet stay BELOW the
+                         # spacing between separate segments so a hairpin's two legs aren't merged.
 
-STEP          = 22       # px advanced along the tangent each crawl iteration
-WIN           = 34       # half-size (px) of the sliding search window
-WIN_MIN_PX    = 12       # bright pixels a window needs to continue the crawl
-MAX_STEPS     = 22       # cap on traced path length
-DIR_SMOOTH    = 0.6      # 0..1 how fast the tangent turns (higher rounds sharper bends)
+# Crawl (trace the centerline along the tangent).
+STEP          = 20       # px advanced along the tangent each step
+ALONG_HALF    = 12       # px: forward half-extent of the cross-section slab sampled each step
+PERP_HALF     = 34       # px: half-width of the cross-section; averages the line's two edges to
+                         # its centerline (same sizing rule as SEED_PERP)
+MIN_SLAB_PX   = 8        # line pixels a cross-section needs to keep crawling
+MAX_STEPS     = 26       # cap on traced path length
+DIR_SMOOTH    = 0.55     # 0..1 how fast the tangent turns (higher rounds sharper bends)
 LOOKAHEAD_M   = 0.35     # meters of arc-length AHEAD of the drone (nadir) to place the carrot
 
 # -- Camera / ground projection (pinhole, downward camera) -------------------
@@ -104,66 +112,77 @@ def reset():
     _last_yaw = 0.0
 
 
-# -- Path tracer ------------------------------------------------------------
+# -- Centerline path tracer -------------------------------------------------
 def _unit(vec):
     n = float(np.linalg.norm(vec))
     return vec / n if n > 1e-6 else vec
 
 
 def find_seed(mask):
-    """The line point nearest bottom-center — where the drone currently sits over the line.
-    Returns (row, col) or None."""
+    """Seed on the line's CENTERLINE nearest bottom-center — where the drone currently sits over
+    the line. Gathers the full line width (both edges) around the nearest column so the seed is
+    the middle of the line, not one edge. Returns (row, col) or None."""
     h, w = mask.shape
     r0 = int(h * (1.0 - SEED_BAND_FRAC))
-    band = np.argwhere(mask[r0:h])
-    if len(band) >= SEED_MIN_PX:
-        gr = band[:, 0] + r0
-        gc = band[:, 1]
-    else:
-        allpx = np.argwhere(mask)                 # fallback: search the whole frame
-        if len(allpx) < SEED_MIN_PX:
+    pts = np.argwhere(mask[r0:h])
+    off = r0
+    if len(pts) < SEED_MIN_PX:
+        pts = np.argwhere(mask)                    # fallback: search the whole frame
+        off = 0
+        if len(pts) < SEED_MIN_PX:
             return None
-        gr, gc = allpx[:, 0], allpx[:, 1]
-    # Anchor on the bright pixel closest to bottom-center, then average its local cluster
-    # (so the seed sits on one leg, not between two).
-    i = np.argmin((gr - (h - 1)) ** 2 + (gc - CX) ** 2)
-    near = (np.abs(gc - gc[i]) < SEED_RADIUS) & (np.abs(gr - gr[i]) < SEED_RADIUS)
-    return (float(gr[near].mean()), float(gc[near].mean()))
+    gr = pts[:, 0] + off
+    gc = pts[:, 1]
+    anchor = gc[np.argmin((gr - (h - 1)) ** 2 + (gc - CX) ** 2)]   # column nearest bottom-center
+    keep = np.abs(gc - anchor) <= SEED_PERP        # the whole width around it (both edges)
+    return (float(gr[keep].mean()), float(gc[keep].mean()))
+
+
+def _cross_center(mask, c, d):
+    """Sample the line's cross-section perpendicular to heading d at the predicted point c, and
+    return the CENTERLINE point (mid-line, averaging the two bright edges), or None. Averaging
+    across the width is what stops the tracer from locking onto one edge and weaving; keeping the
+    slab local (ALONG_HALF x PERP_HALF) is what stops it from averaging in a far hairpin leg."""
+    h, w = mask.shape
+    R = int(max(ALONG_HALF, PERP_HALF)) + 2
+    r0, r1 = max(int(c[0]) - R, 0), min(int(c[0]) + R + 1, h)
+    k0, k1 = max(int(c[1]) - R, 0), min(int(c[1]) + R + 1, w)
+    sub = np.argwhere(mask[r0:r1, k0:k1])
+    if len(sub) < MIN_SLAB_PX:
+        return None
+    gr = (sub[:, 0] + r0) - c[0]
+    gc = (sub[:, 1] + k0) - c[1]
+    dr, dc = float(d[0]), float(d[1])
+    along = gr * dr + gc * dc                       # distance along heading
+    perp = -gr * dc + gc * dr                       # distance across heading (perp_hat = (-dc, dr))
+    keep = (np.abs(along) <= ALONG_HALF) & (np.abs(perp) <= PERP_HALF)
+    if np.count_nonzero(keep) < MIN_SLAB_PX:
+        return None
+    ma = float(along[keep].mean())
+    mp = float(perp[keep].mean())
+    return np.array([c[0] + ma * dr + mp * (-dc), c[1] + ma * dc + mp * dr])
 
 
 def trace_line(mask):
-    """Crawl along the line from the seed, following its local tangent, and return the traced
-    path as a list of (row, col) points ordered from the drone outward. Rounds sharp bends and
-    hairpins because the window follows the tangent instead of averaging every band."""
+    """Crawl along the line's centerline from the seed, following its local tangent, and return
+    the path as a list of (row, col) points ordered from the drone outward. Rounds sharp bends
+    and hairpins because the crawl follows the tangent; stays on the middle of the line because
+    each step re-centers on the cross-section."""
     h, w = mask.shape
     seed = find_seed(mask)
     if seed is None:
         return []
     pos = np.array(seed, dtype=float)
-    direction = np.array([-1.0, 0.0])             # start heading up-frame (ahead of the drone)
+    direction = np.array([-1.0, 0.0])              # start heading up-frame (ahead of the drone)
     path = [(pos[0], pos[1])]
     for _ in range(MAX_STEPS):
-        c = pos + STEP * direction                # predicted next point along the tangent
-        r0, r1 = int(max(c[0] - WIN, 0)), int(min(c[0] + WIN, h))
-        k0, k1 = int(max(c[1] - WIN, 0)), int(min(c[1] + WIN, w))
-        if r1 <= r0 or k1 <= k0:
+        c = pos + STEP * direction                 # predicted next point along the tangent
+        new = _cross_center(mask, c, direction)
+        if new is None:
             break
-        pts = np.argwhere(mask[r0:r1, k0:k1])
-        if len(pts) < WIN_MIN_PX:
-            break
-        gr = pts[:, 0] + r0
-        gc = pts[:, 1] + k0
-        # Weight toward the predicted point c so the crawl locks onto the CONTINUING leg and
-        # does not average in the other leg of a tight bend.
-        wgt = np.exp(-((gr - c[0]) ** 2 + (gc - c[1]) ** 2) / (2.0 * (WIN * 0.5) ** 2))
-        wsum = wgt.sum()
-        if wsum < 1e-6:
-            break
-        new = np.array([(gr * wgt).sum() / wsum, (gc * wgt).sum() / wsum])
-        step_dir = _unit(new - pos)
         if float(np.linalg.norm(new - pos)) < 1e-3:
             break
-        direction = _unit((1.0 - DIR_SMOOTH) * direction + DIR_SMOOTH * step_dir)
+        direction = _unit((1.0 - DIR_SMOOTH) * direction + DIR_SMOOTH * _unit(new - pos))
         pos = new
         path.append((pos[0], pos[1]))
         if pos[0] <= 1 or pos[1] <= 1 or pos[0] >= h - 2 or pos[1] >= w - 2:
@@ -204,7 +223,7 @@ def update(drone):
     v_up = neo_lab.altitude_hold_velocity(drone, TARGET_HEIGHT)   # m/s, holds height on sim & real
 
     frame = drone.camera.get_downward_image()
-    mask  = neo_lab.bright_mask(frame, V_MIN)
+    mask  = neo_lab.line_mask(frame, V_MIN)
     path  = trace_line(mask)
     agl   = max(neo_lab.height(drone), MIN_AGL_M)
     mpp   = agl / FOCAL_PX
@@ -223,7 +242,7 @@ def update(drone):
         fwd_L, right_L = _ground_offset(carrot[0], carrot[1], mpp)
         _, near_right  = _ground_offset(near[0], near[1], mpp)
 
-        # Yaw: true heading angle to the carrot along the traced path (rounds bends/hairpins).
+        # Yaw: true heading angle to the carrot along the traced centerline (rounds bends/hairpins).
         psi_err = math.atan2(right_L, fwd_L)                       # rad; + = carrot to the right
         yaw_rate = uav_utils.clamp(K_PSI * psi_err, -YAW_RATE_MAX, YAW_RATE_MAX)
 

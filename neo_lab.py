@@ -34,6 +34,29 @@ def saturated_mask(image, s_min=100):
     return (hsv[:, :, 1] > s_min).astype(np.uint8) * 255
 
 
+def line_mask(image, v_min=200, close=9, open_=3):
+    """Mask (0/255) of the line for the line follower, by brightness (HSV Value > v_min).
+
+    Brightness is the detector that works the SAME way in both worlds -- a bright LED strip on a
+    dark floor (real drone) and the bright line pixels in the sim -- which is why the labs
+    standardized on it. Morphology then cleans it up: CLOSE bridges gaps (between discrete LEDs,
+    and across a thin line's two bright edges) so the line reads as one band, and OPEN removes
+    speckle. `close`/`open_` are odd kernel sizes in px (0/1 skips that step).
+
+    Note: even if only the line's two EDGES are bright (not the fill) and CLOSE does not fully
+    merge them, the path follower samples the line's full width and steers on its CENTERLINE, so
+    it still does not weave between the edges -- the same reason a least-squares line fit was
+    robust to it."""
+    mask = bright_mask(image, v_min)
+    if close and close > 1:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close, close))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    if open_ and open_ > 1:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_, open_))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    return mask
+
+
 # ── Gate markers (ArUco) ─────────────────────────────────────────────────────────────
 # Each gate carries four DICT_6X6_250 tags, one per corner. The neon strips share the
 # sky's blue hue, so color cannot separate a gate from the background; the tags can.

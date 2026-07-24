@@ -32,20 +32,22 @@ HOLD_TIME = 1.5
 
 # -- Module-level state -----------------------------------------------------
 _x = 0.0
+_y = 0.0
 _z = 0.0
 _hold = 0.0
 _done = False
 
 def reset():
-    global _x, _z, _hold, _done
+    global _x, _y, _z, _hold, _done
     _x = 0.0
+    _y = 0.0
     _z = 0.0
     _hold = 0.0
     _done = False
 
 
 def update(drone):
-    global _x, _z, _hold, _done
+    global _x, _y, _z, _hold, _done
     if _done:
         return True
     ##################################
@@ -62,6 +64,23 @@ def update(drone):
     # the real-drone speed cap for you, so you don't clamp it yourself. Hold height with
     # neo_lab.altitude_hold_velocity. Command all three with send_velocity. Finish when both
     # horizontal errors are under POS_TOL and speed is under SETTLE_SPEED for HOLD_TIME.
+
+    vx, vy, vz = drone.physics.get_linear_velocity()
+    _x += vx * drone.get_delta_time()
+    _y += vy * drone.get_delta_time()
+    _z += vz * drone.get_delta_time()
+    v_right = (TARGET_RIGHT - _x) * KP_POS
+    v_forward = (TARGET_FWD - _z) * KP_POS
+    v_up = neo_lab.altitude_hold_velocity(drone, TARGET_HEIGHT)
+    neo_lab.send_velocity(drone, v_right, v_up, v_forward)
+    speed = (vx**2 + vy**2 + vz**2)**0.5
+    if abs(TARGET_RIGHT - _x) < POS_TOL and abs(TARGET_FWD - _z) < POS_TOL and speed < SETTLE_SPEED:
+        _hold += drone.get_delta_time()
+        if _hold >= HOLD_TIME:
+            print(f"Arrived at ({_x}, {neo_lab.height(drone)}, {_z})")
+            _done = True
+    else:
+        _hold = 0.0
 
     ###### END PUT CODE HERE #########
     ##################################

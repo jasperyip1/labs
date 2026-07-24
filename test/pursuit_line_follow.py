@@ -99,13 +99,13 @@ K_LAT         = 1.2      # strafe (m/s) per meter of lateral offset under the dr
 V_STRAFE_MAX  = 0.40     # m/s cap on strafe
 
 # -- Forward speed (auto-eases in turns; no separate curvature gain) ---------
-V_CRUISE      = 0.6      # m/s on straights
+V_CRUISE      = 0.3      # m/s on straights
 V_FWD_MIN     = 0.20     # m/s at a moderate turn (PSI_SLOW)
 V_TURN_MIN    = 0.10     # m/s floor for a sharp turn when NOT pivoting -- keep crawling forward so
                          # the drone arcs around the bend instead of dead-stopping (which oscillates)
 
 # -- Altitude & run ----------------------------------------------------------
-TARGET_HEIGHT  = 5.0        # meters above launch ground
+TARGET_HEIGHT  = 1.0        # meters above launch ground
 FOLLOW_TIME    = 1000000.0   # seconds to follow before landing
 LOST_YAW_DECAY = 0.6         # keep turning toward the last-seen side while the line is lost
 

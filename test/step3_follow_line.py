@@ -28,9 +28,9 @@ MAX_ROLL      = 0.3     # strafe authority for centering
 FOLLOW_TIME   = 1000000.0     # seconds to follow before landing
 IMAGE_CENTER  = 320      # 640-wide image -> center column
 # add near your other constants
-PITCH_STRAIGHT = 0.5    # fast on straights
-PITCH_TURN     = 0.2    # slow through turns
-CURVE_SCALE    = 50    # residual std at which you're "fully" in a turn (TUNE)
+PITCH_STRAIGHT = 0.3    # fast on straights
+PITCH_TURN     = 0.1    # slow through turns
+CURVE_SCALE    = 180    # residual std at which you're "fully" in a turn (TUNE)
 
 # -- Module-level state -----------------------------------------------------
 _timer = 0.0
@@ -66,6 +66,7 @@ def update(drone):
         yaw = uav_utils.clamp(-m, -1, 1)
 
         curviness = np.std(xs - (m * ys + b))
+        print("curviness",curviness)
         straightness = uav_utils.clamp(1.0 - curviness / CURVE_SCALE, 0.0, 1.0)
         pitch = PITCH_TURN + (PITCH_STRAIGHT - PITCH_TURN) * straightness
 

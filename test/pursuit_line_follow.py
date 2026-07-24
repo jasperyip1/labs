@@ -87,7 +87,7 @@ V_CRUISE      = 0.6      # m/s on straights
 V_FWD_MIN     = 0.20     # m/s held through a moderate turn (0 once pivoting)
 
 # -- Altitude & run ----------------------------------------------------------
-TARGET_HEIGHT  = 0.75        # meters above launch ground
+TARGET_HEIGHT  = 1.0        # meters above launch ground
 FOLLOW_TIME    = 1000000.0   # seconds to follow before landing
 LOST_YAW_DECAY = 0.6         # keep turning toward the last-seen side while the line is lost
 

@@ -112,6 +112,11 @@ def update(drone):
     # autopilot) produces it to hold the commanded velocity. See the README
     # ("Orbiting a point: the geometric controller").
 
+    v_right = vel_r + KP_POS * (pos_r - _x)
+    v_forward = vel_f + KP_POS * (pos_f - _z)
+    v_up = ALT_KP * (TARGET_HEIGHT - neo_lab.height(drone))
+    neo_lab.send_velocity(drone, v_right, v_up, v_forward)
+
     ###### END PUT CODE HERE #########
     ##################################
     radial = ((_x - CENTER_RIGHT) ** 2 + (_z - CENTER_FWD) ** 2) ** 0.5

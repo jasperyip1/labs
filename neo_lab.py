@@ -234,23 +234,17 @@ _REAL_OFFBOARD_RETRY_S = 2.0  # s to wait for OFFBOARD to take before re-request
 
 class Launcher:
     """
-    Gets the drone to `target_height` meters above the launch ground, then hands off. Call
-    update(drone) every frame until it returns True. Ground altitude is sampled once when the
-    launch begins, so height(drone) reports altitude above that.
+    Arms the drone once, then climbs to `target_height` meters above the ground measured when
+    launching begins under velocity control. Call update(drone) every frame until it returns True.
 
-    Sim: takeoff() arms the motors (velocity commands alone do not arm the sim) and imparts an
-    upward impulse, then a velocity P-loop climbs to the target -- the climb overshoots first and
-    settles back, a known sim artifact.
-
-    Real drone: the safety pilot arms, then this commands PX4 AUTO.TAKEOFF and lets the flight
-    controller fly the climb. As soon as the drone passes target_height it primes setpoints and
-    switches back to OFFBOARD (which PX4 accepts only with a recent setpoint stream), so the lab's
-    velocity / position setpoints take over near target_height rather than at PX4's higher takeoff
-    altitude. The safety pilot keeps override by leaving OFFBOARD.
+    takeoff() is called once to arm the motors (velocity commands alone do not arm the sim). In
+    the sim takeoff() also imparts an upward impulse, so the climb overshoots the target before
+    settling back to it -- a known sim artifact; on the real drone the velocity setpoints drive a
+    controlled OFFBOARD climb.
     """
 
-    def __init__(self, target_height=DEFAULT_LAUNCH_HEIGHT, climb_kp=2.5, max_climb_speed=4.5,
-                 tol=0.1, settle=1.0):
+    def __init__(self, target_height=DEFAULT_LAUNCH_HEIGHT, climb_kp=4.0, max_climb_speed=6.5,
+                 tol=0.10, settle=1.0):
         self.target_height = target_height
         self.climb_kp = climb_kp
         self.max_climb_speed = max_climb_speed
@@ -263,11 +257,6 @@ class Launcher:
         self._ground_set = False
         self._armed = False
         self.done = False
-        # Real-drone launch state machine (see _update_real).
-        self._phase = None
-        self._settle = 0.0
-        self._prime = 0.0
-        self._offboard_wait = 0.0
 
     def skip(self, drone):
         """Mark the climb complete and run from wherever the drone already is."""
@@ -282,11 +271,7 @@ class Launcher:
         if not self._ground_set:
             set_ground(drone.physics.get_altitude())
             self._ground_set = True
-        if _is_sim(drone):
-            return self._update_sim(drone, dt)
-        return self._update_real(drone, dt)
 
-    def _update_sim(self, drone, dt):
         # Arm once (velocity commands alone do not arm the sim), then climb under velocity control.
         if not self._armed:
             drone.flight.takeoff()
@@ -303,62 +288,6 @@ class Launcher:
             print(f"[launch] airborne {height(drone):.2f} m above ground "
                   f"(ground={ground():.2f} m)")
         return self.done
-
-    def _update_real(self, drone, dt):
-        """PX4 AUTO.TAKEOFF -> OFFBOARD handoff. Streams nothing while PX4 flies the climb,
-        then primes setpoints and requests OFFBOARD once at/above target_height."""
-        if self._phase is None:
-            self._phase = "wait_arm"
-
-        # 1. Wait for the safety pilot to arm; AUTO.TAKEOFF does nothing while disarmed.
-        if self._phase == "wait_arm":
-            if not drone.state.is_armed():
-                return False
-            self._phase = "takeoff"
-
-        # 2. Command AUTO.TAKEOFF once and let PX4 fly the climb. Advance as soon as the drone
-        #    passes target_height, or if the climb levels off below it (takeoff alt < target).
-        if self._phase == "takeoff":
-            if not self._armed:
-                drone.flight.takeoff()
-                self._armed = True
-            if height(drone) >= self.target_height - self.tol:
-                self._phase, self._prime = "prime", 0.0
-                return False
-            airborne = drone.state.get_landed_state() == drone.state.LandedState.IN_AIR
-            vz = float(drone.physics.get_linear_velocity()[1])
-            if airborne and abs(vz) < _REAL_SETTLE_VZ:
-                self._settle += dt
-                if self._settle >= _REAL_TAKEOFF_SETTLE_S:
-                    self._phase, self._prime = "prime", 0.0
-            else:
-                self._settle = 0.0
-            return False
-
-        # 3. Prime OFFBOARD: stream setpoints for a moment so PX4 will accept the switch.
-        if self._phase == "prime":
-            send_velocity(drone, 0, altitude_hold_velocity(drone, self.target_height), 0)
-            self._prime += dt
-            if self._prime >= _REAL_PRIME_S:
-                drone.flight.start_offboard()
-                self._phase, self._offboard_wait = "offboard", 0.0
-            return False
-
-        # 4. Keep streaming until OFFBOARD takes, re-requesting if PX4 is slow to accept it.
-        if self._phase == "offboard":
-            send_velocity(drone, 0, altitude_hold_velocity(drone, self.target_height), 0)
-            if drone.state.is_offboard():
-                self.done = True
-                print(f"[launch] OFFBOARD at {height(drone):.2f} m above ground "
-                      f"(ground={ground():.2f} m)")
-                return True
-            self._offboard_wait += dt
-            if self._offboard_wait >= _REAL_OFFBOARD_RETRY_S:
-                drone.flight.start_offboard()
-                self._offboard_wait = 0.0
-            return False
-
-        return False
 
 # class Launcher:
 #     """

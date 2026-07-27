@@ -105,7 +105,7 @@ V_TURN_MIN    = 0.10     # m/s floor for a sharp turn when NOT pivoting -- keep 
                          # the drone arcs around the bend instead of dead-stopping (which oscillates)
 
 # -- Altitude & run ----------------------------------------------------------
-TARGET_HEIGHT  = 1.0        # meters above launch ground
+TARGET_HEIGHT  = 10.0        # meters above launch ground
 FOLLOW_TIME    = 1000000.0   # seconds to follow before landing
 LOST_YAW_DECAY = 0.6         # keep turning toward the last-seen side while the line is lost
 

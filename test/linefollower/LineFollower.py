@@ -31,15 +31,15 @@ MAX_YAW       = 1.0     # yaw authority
 FOLLOW_TIME   = 1000000.0     # seconds to follow before landing
 IMAGE_CENTER  = 320      # 640-wide image -> center column
 
-PITCH_STRAIGHT = 0.8    # fast on straights
-PITCH_TURN     = 0.2    # slow through turns
+PITCH_STRAIGHT = 0.0001    # fast on straights
+PITCH_TURN     = 0.00005    # slow through turns
 CURVE_SCALE    = 27   # residual std at which you're "fully" in a turn (TUNE)
 
 # -- PID gains --------------------------------------------------------------
 # KP values below reproduce your original proportional-only behavior exactly
 # when KI and KD are 0. Tune KD up first (damps the weave), then KI only if
 # the drone settles consistently off-center.
-YAW_KP      = 1.0
+YAW_KP      = 3.0
 YAW_KI      = 0.0
 YAW_KD      = 0.1
 YAW_I_LIMIT = 0.30      # cap on the integral's contribution to yaw
@@ -188,7 +188,7 @@ def set_roll(xs, dt):
 def set_pitch(ys, xs, m, b):
     """Fly fast when the edge fits a straight line, slow when it curves."""
     curviness = np.std(xs - (m * ys + b))
-    print(curviness)
+    print(f'Curviness: {curviness}')
     straightness = uav_utils.clamp(1.0 - curviness / CURVE_SCALE, 0.0, 1.0)
     return PITCH_TURN + (PITCH_STRAIGHT - PITCH_TURN) * straightness
 
@@ -243,6 +243,7 @@ def set_throttle(drone, fit, dt):
 # -- Main loop --------------------------------------------------------------
 def update(drone):
     global _timer, _done
+    # print('Update running')
     if _done:
         return True
     dt  = drone.get_delta_time()
@@ -256,6 +257,7 @@ def update(drone):
     else:
         ys, xs, m, b = fit
         pitch = set_pitch(ys, xs, m, b)
+        print(f'Pitch sent to PCMD: {pitch}')
         roll  = set_roll(xs, dt)
         yaw   = set_yaw(m, dt)
         drone.flight.send_pcmd(pitch, roll, yaw, throttle)
@@ -271,7 +273,7 @@ def update(drone):
 
 if __name__ == "__main__":
     _drone = drone_core.create_drone()
-    _launcher = neo_lab.Launcher(1)
+    _launcher = neo_lab.Launcher(1.0)
 
     def start():
         _launcher.reset()
@@ -285,5 +287,6 @@ if __name__ == "__main__":
         if update(_drone):
             _drone.flight.land()
 
+    print(f'------ STARTING CODE ---------\n\n')
     _drone.set_start_update(start, _update)
     _drone.go(not neo_lab._is_sim(_drone))

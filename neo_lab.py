@@ -243,7 +243,7 @@ class Launcher:
     controlled OFFBOARD climb.
     """
 
-    def __init__(self, target_height=DEFAULT_LAUNCH_HEIGHT, climb_kp=2.0, max_climb_speed=3.0,
+    def __init__(self, target_height=DEFAULT_LAUNCH_HEIGHT, climb_kp=1.25, max_climb_speed=2.0,
                  tol=0.10, settle=1.0):
         self.target_height = target_height
         self.climb_kp = climb_kp

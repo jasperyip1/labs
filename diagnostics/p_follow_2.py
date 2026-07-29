@@ -50,7 +50,7 @@ import neo_lab
 # -- Perception thresholds (EXTRAPOLATED for 1-2 m — verify from the log) ----
 V_MIN        = 200        # bright_mask threshold. SOLID: V_p99 was ~230 at
                           # every bench height, so this transfers with height.
-MIN_PIXELS   = 2000        # floor. GUESS for 1-2 m (line ~600-1000 px there).
+MIN_PIXELS   = 200        # floor. GUESS for 1-2 m (line ~600-1000 px there).
                           # Reset to ~40% of the real typical count once you
                           # see the `px` column in flight.
 MAX_PIXELS   = 25000      # ceiling: above this the frame is flooded (phantom).
@@ -59,14 +59,14 @@ MAX_PIXELS   = 25000      # ceiling: above this the frame is flooded (phantom).
 IMAGE_CENTER = 320        # 640-wide image -> center column
 
 # -- Control ----------------------------------------------------------------
-PITCH    = 0.15           # constant, slow. lower = slower = tighter turns
+PITCH    = 0.20           # constant, slow. lower = slower = tighter turns
 THROTTLE = 0.0            # hold height; launcher already set it
 
-KP_ROLL = 0.30            # strafe per unit of normalized centroid offset
-KP_YAW  = 1.20            # yaw per radian of line angle
+KP_ROLL = 0.15            # strafe per unit of normalized centroid offset
+KP_YAW  = 0.20            # yaw per radian of line angle
 
-MAX_ROLL = 0.70
-MAX_YAW  = 1.00
+MAX_ROLL = 0.50
+MAX_YAW  = 1.50
 
 # Near +/-90deg the line is nearly horizontal and the fitted angle's sign is
 # noise-dominated (wraps +89 <-> -89). Past this limit, clamp the error to the
@@ -246,7 +246,7 @@ def _print_summary():
 # -- Entry point ------------------------------------------------------------
 if __name__ == "__main__":
     _drone = drone_core.create_drone()
-    _launcher = neo_lab.Launcher(0.7)          # fly higher: 1.5 m
+    _launcher = neo_lab.Launcher(1.0)          # fly higher: 1.5 m
 
     def start():
         _launcher.reset()

@@ -207,7 +207,7 @@ def send_velocity(drone, v_right, v_up, v_forward, yaw_rate=0.0):
         )
 
 
-_ALT_HOLD_KP = 0.6      # m/s of vertical correction per meter of altitude error (matches module3_trajectory)
+_ALT_HOLD_KP = 0.2      # m/s of vertical correction per meter of altitude error (matches module3_trajectory)
 _ALT_HOLD_MAX = 1.5     # m/s cap on the altitude-hold correction
 
 
@@ -243,7 +243,7 @@ class Launcher:
     controlled OFFBOARD climb.
     """
 
-    def __init__(self, target_height=DEFAULT_LAUNCH_HEIGHT, climb_kp=4.0, max_climb_speed=6.5,
+    def __init__(self, target_height=DEFAULT_LAUNCH_HEIGHT, climb_kp=2.0, max_climb_speed=3.0,
                  tol=0.10, settle=1.0):
         self.target_height = target_height
         self.climb_kp = climb_kp

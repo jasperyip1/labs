@@ -62,68 +62,77 @@ def update(drone):
 
     if _phase == 0: # detect tags
         img = drone.camera.get_color_image()
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = neo_lab._detect_gate_markers(gray)
-
-        if ids is None or len(ids) == 0:
-            drone.flight.send_pcmd(SEARCH_PITCH, 0, 0, 0)
-            if _frame % 5 == 0:
-                print(f'No tags found!')
-
+        if img is None:
+            print("[Error]: Image is none!")
         else:
-            tag_centers = np.array([c.reshape(-1, 2).mean(axis=0) for c in corners])
-            depth_img = drone.camera.get_depth_image()
-            dists = np.array([
-                uav_utils.get_pixel_average_distance(depth_img, (int(cx), int(cy)), kernel_size=5) / 100.0
-                for cx, cy in tag_centers
-            ])  # cm -> meters
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            corners, ids, _ = neo_lab._detect_gate_markers(gray)
 
-            print(f'{len(ids)} tags found! Distances: {dists}')
+            if ids is None or len(ids) == 0:
+                drone.flight.send_pcmd(SEARCH_PITCH, 0, 0, 0)
+                if _frame % 5 == 0:
+                    print(f'No tags found!')
+
+            else:
+                tag_centers = np.array([c.reshape(-1, 2).mean(axis=0) for c in corners])
+                depth_img = drone.camera.get_depth_image()
+                dists = np.array([
+                    uav_utils.get_pixel_average_distance(depth_img, (int(cx), int(cy)), kernel_size=5) / 100.0
+                    for cx, cy in tag_centers
+                ])  # cm -> meters
+
+                print(f'{len(ids)} tags found! Distances: {dists}')
 
     if _phase == 1:  # detect gate
         img = drone.camera.get_color_image()
-        _gate = neo_lab.detect_gate(img)
-
-        if _gate is None:
-            if _frame % 5 == 0:
-                print(f'No gates found!')
-
+        if img is None:
+            print("[Error]: Image is none!")
         else:
-            print(f'Gate detected! cx, cy = {_gate.cx, _gate.cy}')
+            _gate = neo_lab.detect_gate(img)
+
+            if _gate is None:
+                if _frame % 5 == 0:
+                    print(f'No gates found!')
+
+            else:
+                print(f'Gate detected! cx, cy = {_gate.cx, _gate.cy}')
 
     if _phase == 2:  # P controller: center on the gate
         img = drone.camera.get_color_image()
-        _gate = neo_lab.detect_gate(img)
-
-        if _gate is None:
-            drone.flight.stop()
-            _hold = 0.0
-            if _frame % 5 == 0:
-                print(f'No gates found!')
+        if img is None:
+            print("[Error]: Image is none!")
         else:
-            width, height = drone.camera.get_width(), drone.camera.get_height()
-            img_cx, img_cy = width / 2.0, height / 2.0
+            _gate = neo_lab.detect_gate(img)
 
-            # normalized error in [-1, 1]: +err_x = gate right of center, +err_y = gate below center
-            err_x = (_gate.cx - img_cx) / (width / 2.0)
-            err_y = (_gate.cy - img_cy) / (height / 2.0)
-
-            roll     = uav_utils.clamp(CENTER_KP_X * err_x, -ROLL_LIMIT, ROLL_LIMIT)
-            throttle = uav_utils.clamp(-CENTER_KP_Y * err_y, -THROTTLE_LIMIT, THROTTLE_LIMIT)
-
-            drone.flight.send_pcmd(0, roll, 0, throttle)
-
-            if _frame % 5 == 0:
-                print(f'Centering... err_x={err_x:.3f}, err_y={err_y:.3f}, hold={_hold:.2f}')
-
-            if abs(err_x) < CENTER_TOL and abs(err_y) < CENTER_TOL:
-                _hold += drone.get_delta_time()
-                if _hold >= CENTER_HOLD_T:
-                    drone.flight.stop()
-                    print('Gate centered!')
-                    _done = True
-            else:
+            if _gate is None:
+                drone.flight.stop()
                 _hold = 0.0
+                if _frame % 5 == 0:
+                    print(f'No gates found!')
+            else:
+                width, height = drone.camera.get_width(), drone.camera.get_height()
+                img_cx, img_cy = width / 2.0, height / 2.0
+
+                # normalized error in [-1, 1]: +err_x = gate right of center, +err_y = gate below center
+                err_x = (_gate.cx - img_cx) / (width / 2.0)
+                err_y = (_gate.cy - img_cy) / (height / 2.0)
+
+                roll     = uav_utils.clamp(CENTER_KP_X * err_x, -ROLL_LIMIT, ROLL_LIMIT)
+                throttle = uav_utils.clamp(-CENTER_KP_Y * err_y, -THROTTLE_LIMIT, THROTTLE_LIMIT)
+
+                drone.flight.send_pcmd(0, roll, 0, throttle)
+
+                if _frame % 5 == 0:
+                    print(f'Centering... err_x={err_x:.3f}, err_y={err_y:.3f}, hold={_hold:.2f}')
+
+                if abs(err_x) < CENTER_TOL and abs(err_y) < CENTER_TOL:
+                    _hold += drone.get_delta_time()
+                    if _hold >= CENTER_HOLD_T:
+                        drone.flight.stop()
+                        print('Gate centered!')
+                        _done = True
+                else:
+                    _hold = 0.0
 
     ###### END PUT CODE HERE #########
     ##################################
@@ -132,19 +141,20 @@ def update(drone):
 
 if __name__ == "__main__":
     _drone = drone_core.create_drone()
-    _launcher = neo_lab.Launcher()
+    # _launcher = neo_lab.Launcher()
 
     def start():
-        _launcher.reset()
-        reset()
+        # _launcher.reset()
+        # reset()
         print(f"===== ARUCO MARKER TEST CODE. Phase {PHASES[_phase]} =====")
 
     def _update():
-        if not _launcher.done:        # arm + climb to a safe height first
-            _launcher.update(_drone)
-            return
+        # if not _launcher.done:        # arm + climb to a safe height first
+        #     _launcher.update(_drone)
+        #     return
         if update(_drone):
             _drone.flight.land()
+            return
 
     _drone.set_start_update(start, _update)
-    _drone.go()
+    _drone.go(not neo_lab._is_sim(_drone))

@@ -31,18 +31,18 @@ MAX_YAW       = 1.0     # yaw authority
 FOLLOW_TIME   = 1000000.0     # seconds to follow before landing
 IMAGE_CENTER  = 320      # 640-wide image -> center column
 
-PITCH_STRAIGHT = 0.0001    # fast on straights
-PITCH_TURN     = 0.00005    # slow through turns
-CURVE_SCALE    = 27   # residual std at which you're "fully" in a turn (TUNE)
+PITCH_STRAIGHT = 0.4    # fast on straights
+PITCH_TURN     = 0.1    # slow through turns
+CURVE_SCALE    = 100   # residual std at which you're "fully" in a turn (TUNE)
 
 # -- PID gains --------------------------------------------------------------
 # KP values below reproduce your original proportional-only behavior exactly
 # when KI and KD are 0. Tune KD up first (damps the weave), then KI only if
 # the drone settles consistently off-center.
-YAW_KP      = 3.0
-YAW_KI      = 0.0
-YAW_KD      = 0.1
-YAW_I_LIMIT = 0.30      # cap on the integral's contribution to yaw
+YAW_KP      = 0.6
+YAW_KI = 0.0
+YAW_KD      = 0.0
+YAW_I_LIMIT = 0.20      # cap on the integral's contribution to yaw
 
 ROLL_KP      = 0.2      # was MAX_ROLL used as the gain
 ROLL_KI      = 0.0
@@ -257,9 +257,9 @@ def update(drone):
     else:
         ys, xs, m, b = fit
         pitch = set_pitch(ys, xs, m, b)
-        print(f'Pitch sent to PCMD: {pitch}')
         roll  = set_roll(xs, dt)
         yaw   = set_yaw(m, dt)
+        print(f'Pitch = {pitch}, Roll = {roll}, Yaw = {yaw}')
         drone.flight.send_pcmd(pitch, roll, yaw, throttle)
 
     _timer += dt

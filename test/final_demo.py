@@ -389,19 +389,21 @@ def _update_line_follow(drone, dt):
     if fit is None:
         _yaw_pid.hold()
         _roll_pid.hold()
-        drone.flight.send_pcmd(0.0, 0.0, 0.0, throttle)
+        # drone.flight.send_pcmd(0.0, 0.0, 0.0, throttle)   # hold level, climb -- disabled per team: untuned, works worse
         if _frame % LINE_PRINT_EVERY == 0:
-            print(f'[line follow] no edge found | state={_line_state} throttle={throttle:.3f}')
+            print(f'[line follow] no edge found | state={_line_state} '
+                  f'(computed throttle={throttle:.3f}, NOT sent)')
     else:
         ys, xs, m, b, poly, closest_pt = fit
         pitch = set_pitch(ys, xs, poly)
         roll  = set_roll(xs, dt)
         yaw   = set_yaw(m, dt)
-        drone.flight.send_pcmd(pitch, roll, yaw, throttle)
+        # drone.flight.send_pcmd(pitch, roll, yaw, throttle)   # disabled per team: untuned altitude control, works worse
+        drone.flight.send_pcmd(pitch, roll, yaw, 0.0)
 
         if _frame % LINE_PRINT_EVERY == 0:
             print(f'[line follow] pitch={pitch:.3f} roll={roll:.3f} yaw={yaw:.3f} '
-                  f'throttle={throttle:.3f} state={_line_state}')
+                  f'throttle=0.0 (computed={throttle:.3f}, not sent) state={_line_state}')
 
 
 # ============================================================

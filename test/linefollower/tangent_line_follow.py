@@ -29,7 +29,7 @@ MAX_YAW       = 1.0     # yaw authority
 FOLLOW_TIME   = 1000000.0     # seconds to follow before landing
 IMAGE_CENTER  = 320      # 640-wide image -> center column
 
-PITCH_STRAIGHT = 0.4    # fast on straights
+PITCH_STRAIGHT = 0.2    # fast on straights
 PITCH_TURN     = 0.1    # slow through turns
 CURVE_SCALE    = 100   # residual std at which you're "fully" in a turn (TUNE)
 
@@ -42,9 +42,9 @@ YAW_KI = 0.0
 YAW_KD      = 0.0
 YAW_I_LIMIT = 0.20      # cap on the integral's contribution to yaw
 
-ROLL_KP      = 0.2      # was MAX_ROLL used as the gain
+ROLL_KP      = 0.18      # was MAX_ROLL used as the gain
 ROLL_KI      = 0.0
-ROLL_KD      = 0.15
+ROLL_KD      = 0.1
 ROLL_I_LIMIT = 0.10
 
 D_TAU = 0.10    # derivative low-pass time constant, seconds (bigger = smoother)
@@ -58,7 +58,7 @@ FOUND_GRACE      = 0.5    # seconds of line before committing to descend
 HEIGHT_TOL       = 0.10   # meters; "back at base height"
 
 # -- Perception Constants ----------------------------------------------------
-POLY_DEGREE = 5          # 3 or 5 both work; higher degree fits noise more easily
+POLY_DEGREE = 3          # 3 or 5 both work; higher degree fits noise more easily
 IMG_W, IMG_H = 640, 480
 TARGET_POINT = (IMG_W / 2, IMG_H / 2 - 60)   # (x, y) — "slightly higher" than center
 SAMPLE_STEP = 2           # px spacing when scanning the curve for the closest point

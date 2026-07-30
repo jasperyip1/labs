@@ -70,6 +70,32 @@ def bright_mask(image, v_min=200):
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     return (hsv[:, :, 2] > v_min).astype(np.uint8) * 255
 
+def bright_mask_improved(image, v_min=200):
+    """
+    Binary mask (0/255) of the glowing gate edges, by HSV Value (brightness).
+
+    Thresholds on V, then cleans the result with morphological open/close
+    and keeps only the largest connected component, so stray speckle noise
+    or unrelated bright objects in frame don't survive into the fit.
+    """
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    mask = (hsv[:, :, 2] > v_min).astype(np.uint8) * 255
+
+    # -- Morphological cleanup: remove small noise blobs, fill small gaps
+    #    in the line itself.
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    # -- Keep only the largest connected component. If there's glare or a
+    #    second bright object elsewhere in frame, this drops it rather than
+    #    letting it drag the downstream polynomial fit around.
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if num_labels > 1:
+        largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+        mask = (labels == largest).astype(np.uint8) * 255
+
+    return mask
 
 def largest_bright_contour(image, v_min=200, min_area=200, dilate=2):
     """Return the largest glowing-edge contour in the image, or None."""

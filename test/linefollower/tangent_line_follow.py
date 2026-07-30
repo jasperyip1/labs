@@ -29,22 +29,25 @@ MAX_YAW       = 1.0     # yaw authority
 FOLLOW_TIME   = 1000000.0     # seconds to follow before landing
 IMAGE_CENTER  = 320      # 640-wide image -> center column
 
-PITCH_STRAIGHT = 0.2    # fast on straights
+PITCH_STRAIGHT = 0.15    # fast on straights
 PITCH_TURN     = 0.1    # slow through turns
 CURVE_SCALE    = 100   # residual std at which you're "fully" in a turn (TUNE)
 
 # -- PID gains --------------------------------------------------------------
-# KP values below reproduce your original proportional-only behavior exactly
-# when KI and KD are 0. Tune KD up first (damps the weave), then KI only if
-# the drone settles consistently off-center.
+# Start by increasing the proportional gain (KP) incrementally to a point where it
+# oscillates, then reduce by 50%. Then add derivative gain (KD) to dampen oscillations,
+# and finally add integral gain (KI) only if the drone consistently settles off-center.
+# The integral term can help correct for steady-state errors, but it can also introduce
+# overshoot if not tuned carefully.
+
 YAW_KP      = 0.6
-YAW_KI = 0.0
+YAW_KI      = 0.0
 YAW_KD      = 0.0
 YAW_I_LIMIT = 0.20      # cap on the integral's contribution to yaw
 
-ROLL_KP      = 0.18      # was MAX_ROLL used as the gain
+ROLL_KP      = 0.2      # was MAX_ROLL used as the gain
 ROLL_KI      = 0.0
-ROLL_KD      = 0.1
+ROLL_KD      = 0.0
 ROLL_I_LIMIT = 0.10
 
 D_TAU = 0.10    # derivative low-pass time constant, seconds (bigger = smoother)
@@ -170,7 +173,7 @@ def find_edge(drone):
     enough bright pixels to trust.
     """
     camera = drone.camera.get_downward_image()
-    mask = neo_lab.bright_mask(camera, V_MIN)
+    mask = neo_lab.bright_mask_improved(camera, V_MIN)
     edges = np.argwhere(mask)
     edges = edges.astype(np.float64)
 

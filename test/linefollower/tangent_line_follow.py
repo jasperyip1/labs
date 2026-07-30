@@ -24,13 +24,13 @@ import neo_lab
 # -- Constants --------------------------------------------------------------
 V_MIN         = 200
 MIN_PIXELS    = 200
-MAX_ROLL      = 0.3     # strafe authority for centering
+MAX_ROLL      = 0.25     # strafe authority for centering
 MAX_YAW       = 1.0     # yaw authority
 FOLLOW_TIME   = 1000000.0     # seconds to follow before landing
 IMAGE_CENTER  = 320      # 640-wide image -> center column
 
-PITCH_STRAIGHT = 0.15    # fast on straights
-PITCH_TURN     = 0.1    # slow through turns
+PITCH_STRAIGHT = 0.14    # fast on straights
+PITCH_TURN     = 0.08    # slow through turns
 CURVE_SCALE    = 100   # residual std at which you're "fully" in a turn (TUNE)
 
 # -- PID gains --------------------------------------------------------------
@@ -40,14 +40,14 @@ CURVE_SCALE    = 100   # residual std at which you're "fully" in a turn (TUNE)
 # The integral term can help correct for steady-state errors, but it can also introduce
 # overshoot if not tuned carefully.
 
-YAW_KP      = 0.6
+YAW_KP      = 0.60       # Adjust first
 YAW_KI      = 0.0
-YAW_KD      = 0.0
+YAW_KD      = 0.055
 YAW_I_LIMIT = 0.20      # cap on the integral's contribution to yaw
 
-ROLL_KP      = 0.2      # was MAX_ROLL used as the gain
+ROLL_KP      = 0.24      # Adjust first
 ROLL_KI      = 0.0
-ROLL_KD      = 0.0
+ROLL_KD      = 0.02
 ROLL_I_LIMIT = 0.10
 
 D_TAU = 0.10    # derivative low-pass time constant, seconds (bigger = smoother)
@@ -63,7 +63,7 @@ HEIGHT_TOL       = 0.10   # meters; "back at base height"
 # -- Perception Constants ----------------------------------------------------
 POLY_DEGREE = 3          # 3 or 5 both work; higher degree fits noise more easily
 IMG_W, IMG_H = 640, 480
-TARGET_POINT = (IMG_W / 2, IMG_H / 2 - 60)   # (x, y) — "slightly higher" than center
+TARGET_POINT = (IMG_W / 2, IMG_H / 2 - 80)   # (x, y) — "slightly higher" than center
 SAMPLE_STEP = 2           # px spacing when scanning the curve for the closest point
 
 
@@ -297,14 +297,15 @@ def update(drone):
     if fit is None:
         _yaw_pid.hold()
         _roll_pid.hold()
-        drone.flight.send_pcmd(0.0, 0.0, 0.0, throttle)   # hold level, climb
+        # drone.flight.send_pcmd(0.0, 0.0, 0.0, throttle)   # hold level, climb
     else:
         ys, xs, m, b, poly, closest_pt = fit
         pitch = set_pitch(ys, xs, poly)
         roll  = set_roll(xs, dt)
         yaw   = set_yaw(m, dt)
         print(f'Pitch = {pitch}, Roll = {roll}, Yaw = {yaw}')
-        drone.flight.send_pcmd(pitch, roll, yaw, throttle)
+        # drone.flight.send_pcmd(pitch, roll, yaw, throttle)
+        drone.flight.send_pcmd(pitch, roll, yaw, 0.0)
 
     _timer += dt
     if _timer >= FOLLOW_TIME:
@@ -317,7 +318,7 @@ def update(drone):
 
 if __name__ == "__main__":
     _drone = drone_core.create_drone()
-    _launcher = neo_lab.Launcher(1.0)
+    _launcher = neo_lab.Launcher(1.4)
 
     def start():
         _launcher.reset()

@@ -79,7 +79,7 @@ GATE_ROLL_KI      = 0.0
 GATE_ROLL_KD      = 0.0
 GATE_ROLL_I_LIMIT = 0.10
 
-GATE_ALT_KP      = 1.5
+GATE_ALT_KP      = 0.3
 GATE_ALT_KI      = 0.0
 GATE_ALT_KD      = 0.0
 GATE_ALT_I_LIMIT = 0.10
@@ -93,9 +93,9 @@ SEARCH_YAW     = 0.1
 GATE_PITCH     = 0.4
 
 GATE_CHECK_EVERY   = 5
-GATE_DIST_MIN_TAGS = 2  # min tags for it to count as a gate
+GATE_DIST_MIN_TAGS = 1   # min tags for it to measure dist to gate
 GATE_SETTLE_FRAMES = 20
-GATE_CONFIRM_HITS  = 3
+GATE_CONFIRM_HITS  = 1  # min frames with tag in them for it to count as gate
 
 FORWARD_MARGIN    = 1.0
 FORWARD_MAX_TIME  = 6.0

@@ -1,5 +1,3 @@
-# Original baseline + PID
-
 """
 MIT BWSI Autonomous Drone Racing Course - UAV Neo
 GNU General Public License v3.0
@@ -165,9 +163,11 @@ def find_edge(drone):
     or a bit above it), then returns the tangent line to the curve at that
     point in the same (m, b) format as before: column = m * row + b.
 
-    Returns (ys, xs, m, b, closest_pt) where closest_pt is the (row, col)
-    point used for the tangent, or None if there aren't enough bright pixels
-    to trust.
+    Returns (ys, xs, m, b, poly, closest_pt) where `poly` is the fitted
+    np.poly1d (used downstream for a curvature/straightness measure that
+    reflects the actual fit, not just the local tangent), and closest_pt is
+    the (row, col) point used for the tangent. Returns None if there aren't
+    enough bright pixels to trust.
     """
     camera = drone.camera.get_downward_image()
     mask = neo_lab.bright_mask(camera, V_MIN)
@@ -201,7 +201,7 @@ def find_edge(drone):
     m = poly_deriv(y0)
     b = x0 - m * y0
 
-    return ys, xs, m, b, (y0, x0)
+    return ys, xs, m, b, poly, (y0, x0)
 
 
 # -- Control axes -----------------------------------------------------------
@@ -218,9 +218,17 @@ def set_roll(xs, dt):
     return _roll_pid.update(error, dt)
 
 
-def set_pitch(ys, xs, m, b):
-    """Fly fast when the edge fits a straight line, slow when it curves."""
-    curviness = np.std(xs - (m * ys + b))
+def set_pitch(ys, xs, poly):
+    """
+    Fly fast when the edge fits the polynomial tightly (straight/simple),
+    slow when the raw pixels deviate a lot from the fit (curvy/noisy).
+
+    Note: this measures deviation from the polynomial fit itself, not from
+    the tangent line used for steering — the tangent only approximates the
+    curve near the steering point, so using it here would read as "curvy"
+    even on a straight line.
+    """
+    curviness = np.std(xs - poly(ys))
     print(f'Curviness: {curviness}')
     straightness = uav_utils.clamp(1.0 - curviness / CURVE_SCALE, 0.0, 1.0)
     return PITCH_TURN + (PITCH_STRAIGHT - PITCH_TURN) * straightness
@@ -288,8 +296,8 @@ def update(drone):
         _roll_pid.hold()
         drone.flight.send_pcmd(0.0, 0.0, 0.0, throttle)   # hold level, climb
     else:
-        ys, xs, m, b = fit
-        pitch = set_pitch(ys, xs, m, b)
+        ys, xs, m, b, poly, closest_pt = fit
+        pitch = set_pitch(ys, xs, poly)
         roll  = set_roll(xs, dt)
         yaw   = set_yaw(m, dt)
         print(f'Pitch = {pitch}, Roll = {roll}, Yaw = {yaw}')

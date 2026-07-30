@@ -41,7 +41,6 @@ CURVE_SCALE    = 100   # residual std at which you're "fully" in a turn (TUNE)
 # the drone settles consistently off-center.
 YAW_KP      = 0.6   # works: 0.6
 YAW_KI = 0.0
-YAW_KI = 0.0
 YAW_KD      = 0.0
 YAW_I_LIMIT = 0.20      # cap on the integral's contribution to yaw
 

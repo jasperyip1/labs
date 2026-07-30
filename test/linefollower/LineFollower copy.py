@@ -26,7 +26,7 @@ import neo_lab
 # -- Constants --------------------------------------------------------------
 V_MIN         = 200
 MIN_PIXELS    = 200
-MAX_ROLL      = 0.2     # strafe authority for centering
+MAX_ROLL      = 0.3     # strafe authority for centering
 MAX_YAW       = 1.0     # yaw authority
 FOLLOW_TIME   = 1000000.0     # seconds to follow before landing
 IMAGE_CENTER  = 320      # 640-wide image -> center column

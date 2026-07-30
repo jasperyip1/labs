@@ -1,0 +1,1 @@
+cd ~/jupyter_ws/student/labs/test

@@ -23,13 +23,16 @@ import neo_lab
 
 # -- Constants --------------------------------------------------------------
 SEARCH_PITCH   = 0.1        # creep forward; ArUco tags only resolve up close
+PITCH = 0.4
+SEARCH_YAW = 0.1
 SEARCH_TIMEOUT = 15.0       # give up if no gate decodes in this many seconds
 PHASES = ['detect_tag', 'detect_gate', 'p_center', 'forward']
-SET_PHASE = 0
+SET_PHASE = 1
 
 CENTER_KP_X    = 1.5     # roll gain: normalized pixel error -> roll command
-CENTER_KP_Y    = 1.5     # throttle gain: normalized pixel error -> throttle command
-CENTER_TOL     = 0.05    # normalized error under this counts as "centered"
+ALT_KP         = 1.5     # altitude gain: normalized vertical pixel error -> throttle command
+CENTER_TOL     = 0.05    # normalized horizontal error under this counts as "centered"
+ALT_TOL        = 0.05    # normalized vertical error under this counts as "height matched"
 CENTER_HOLD_T  = 0.5     # seconds error must stay within tolerance before done
 ROLL_LIMIT     = 0.3
 THROTTLE_LIMIT = 0.3
@@ -41,21 +44,24 @@ _frame = 0
 _phase = SET_PHASE
 _gate = None
 _hold = 0.0
+_pass_gate = 0.0
 
 def reset():
-    global _timer, _done, _frame, _phase, _gate, _hold
+    global _timer, _done, _frame, _phase, _gate, _hold, _pass_gate
     _timer = 0.0
     _done  = False
     _frame = 0
     _phase = SET_PHASE
     _gate = None
     _hold = 0.0
+    _pass_gate = 0.0
 
 def update(drone):
-    global _timer, _done, _frame, _phase, _gate, _hold
+    global _timer, _done, _frame, _phase, _gate, _hold, _pass_gate
     if _done:
         return True
-    _timer += drone.get_delta_time()
+    dt = drone.get_delta_time()
+    _timer += dt
     _frame += 1
     ##################################
     #### START PUT CODE HERE #########
@@ -69,19 +75,30 @@ def update(drone):
             corners, ids, _ = neo_lab._detect_gate_markers(gray)
 
             if ids is None or len(ids) == 0:
-                drone.flight.send_pcmd(SEARCH_PITCH, 0, 0, 0)
+                # drone.flight.send_pcmd(SEARCH_PITCH, 0, 0, 0)
                 if _frame % 5 == 0:
                     print(f'No tags found!')
 
             else:
                 tag_centers = np.array([c.reshape(-1, 2).mean(axis=0) for c in corners])
                 depth_img = drone.camera.get_depth_image()
-                dists = np.array([
-                    uav_utils.get_pixel_average_distance(depth_img, (int(cx), int(cy)), kernel_size=5) / 100.0
-                    for cx, cy in tag_centers
-                ])  # cm -> meters
 
-                print(f'{len(ids)} tags found! Distances: {dists}')
+                if depth_img is None:
+                    print("[Error]: Depth image is none!")
+                else:
+                    ch, cw = gray.shape[:2]          # color image height, width
+                    dh, dw = depth_img.shape[:2]     # depth image height, width
+                    sx, sy = dw / cw, dh / ch        # scale factors, color -> depth space
+
+                    dists = []
+                    for cx, cy in tag_centers:
+                        dx = int(np.clip(cx * sx, 0, dw - 1))   # column -> clipped to width
+                        dy = int(np.clip(cy * sy, 0, dh - 1))   # row    -> clipped to height
+                        d = uav_utils.get_pixel_average_distance(depth_img, (dy, dx), kernel_size=5) / 100.0
+                        dists.append(d)
+                    dists = np.array(dists)
+
+                    print(f'{len(ids)} tags found! Distances: {dists}')
 
     if _phase == 1:  # detect gate
         img = drone.camera.get_color_image()
@@ -97,7 +114,7 @@ def update(drone):
             else:
                 print(f'Gate detected! cx, cy = {_gate.cx, _gate.cy}')
 
-    if _phase == 2:  # P controller: center on the gate
+    if _phase == 2:  # P controllers: center on the gate (roll) and match its height (altitude)
         img = drone.camera.get_color_image()
         if img is None:
             print("[Error]: Image is none!")
@@ -106,6 +123,7 @@ def update(drone):
 
             if _gate is None:
                 drone.flight.stop()
+                drone.flight.send_pcmd(0, 0, SEARCH_YAW, 0)
                 _hold = 0.0
                 if _frame % 5 == 0:
                     print(f'No gates found!')
@@ -113,26 +131,36 @@ def update(drone):
                 width, height = drone.camera.get_width(), drone.camera.get_height()
                 img_cx, img_cy = width / 2.0, height / 2.0
 
-                # normalized error in [-1, 1]: +err_x = gate right of center, +err_y = gate below center
+                # --- Horizontal centering P controller (roll) ---
+                # normalized error in [-1, 1]: +err_x = gate right of center
                 err_x = (_gate.cx - img_cx) / (width / 2.0)
-                err_y = (_gate.cy - img_cy) / (height / 2.0)
+                roll = uav_utils.clamp(CENTER_KP_X * err_x, -ROLL_LIMIT, ROLL_LIMIT)
 
-                roll     = uav_utils.clamp(CENTER_KP_X * err_x, -ROLL_LIMIT, ROLL_LIMIT)
-                throttle = uav_utils.clamp(-CENTER_KP_Y * err_y, -THROTTLE_LIMIT, THROTTLE_LIMIT)
+                # --- Altitude P controller (throttle) ---
+                # normalized error in [-1, 1]: +err_alt = gate below center -> need to climb
+                err_alt = (_gate.cy - img_cy) / (height / 2.0)
+                throttle = uav_utils.clamp(-ALT_KP * err_alt, -THROTTLE_LIMIT, THROTTLE_LIMIT)
 
                 drone.flight.send_pcmd(0, roll, 0, throttle)
 
                 if _frame % 5 == 0:
-                    print(f'Centering... err_x={err_x:.3f}, err_y={err_y:.3f}, hold={_hold:.2f}')
+                    print(f'Centering... err_x={err_x:.3f}, err_alt={err_alt:.3f}, hold={_hold:.2f}')
 
-                if abs(err_x) < CENTER_TOL and abs(err_y) < CENTER_TOL:
-                    _hold += drone.get_delta_time()
+                if abs(err_x) < CENTER_TOL and abs(err_alt) < ALT_TOL:
+                    _hold += dt
                     if _hold >= CENTER_HOLD_T:
                         drone.flight.stop()
                         print('Gate centered!')
-                        _done = True
+                        _phase = 3
                 else:
                     _hold = 0.0
+
+    if _phase == 3:  # forward
+        _pass_gate += dt
+        drone.flight.send_pcmd(PITCH, 0, 0, 0)
+
+        if _pass_gate > 3.0:
+            _done = True
 
     ###### END PUT CODE HERE #########
     ##################################

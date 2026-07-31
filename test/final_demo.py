@@ -96,6 +96,7 @@ GATE_CHECK_EVERY   = 5
 GATE_DIST_MIN_TAGS = 1   # min tags for it to measure dist to gate
 GATE_SETTLE_FRAMES = 20
 GATE_CONFIRM_HITS  = 1  # min frames with tag in them for it to count as gate
+GATE_MIN_TAGS_TO_ADVANCE = 3   # min tags visible before "centered" can start counting toward CENTER_HOLD_T
 
 FORWARD_MARGIN    = 1.0
 FORWARD_MAX_TIME  = 6.0
@@ -445,11 +446,12 @@ def _update_gate(drone, dt):
         drone.flight.send_pcmd(0, roll, 0, throttle)
 
         if _frame % GATE_PRINT_EVERY == 0:
-            print(f'[gate] centering | gate=({_gate.cx:.0f},{_gate.cy:.0f}) '
+            print(f'[gate] centering | gate=({_gate.cx:.0f},{_gate.cy:.0f}) tags={_gate.count} '
                   f'err_x={err_x:.3f} err_alt={err_alt:.3f} '
                   f'roll={roll:.3f} throttle={throttle:.3f} hold={_hold:.2f}')
 
-        if abs(err_x) < CENTER_TOL and abs(err_alt) < ALT_TOL:
+        enough_tags = _gate.count >= GATE_MIN_TAGS_TO_ADVANCE
+        if abs(err_x) < CENTER_TOL and abs(err_alt) < ALT_TOL and enough_tags:
             _hold += dt
             if _hold >= CENTER_HOLD_T:
                 drone.flight.stop()
@@ -458,6 +460,10 @@ def _update_gate(drone, dt):
                 _forward_time = 0.0
                 _forward_dist = 0.0
         else:
+            if abs(err_x) < CENTER_TOL and abs(err_alt) < ALT_TOL and not enough_tags:
+                if _frame % GATE_PRINT_EVERY == 0:
+                    print(f'[gate] position looks centered but only {_gate.count} tag(s) visible '
+                          f'(need {GATE_MIN_TAGS_TO_ADVANCE}) - not counting toward hold yet.')
             _hold = 0.0
 
     elif _gate_phase == GATE_FORWARD:

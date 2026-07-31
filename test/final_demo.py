@@ -89,7 +89,7 @@ ALT_TOL        = 0.05
 CENTER_HOLD_T  = 0.5
 ROLL_LIMIT     = 0.3
 THROTTLE_LIMIT = 0.3
-SEARCH_YAW     = 0.1
+SEARCH_YAW     = 0.2
 GATE_PITCH     = 0.4
 
 GATE_CHECK_EVERY   = 5
@@ -513,10 +513,10 @@ def update(drone):
     _timer += dt
     _frame += 1
 
-    if _mode == LINE_FOLLOW:
-        _update_line_follow(drone, dt)
-    elif _mode == GATE:
-        _update_gate(drone, dt)
+    # if _mode == LINE_FOLLOW:
+    #     _update_line_follow(drone, dt)
+    # elif _mode == GATE:
+    _update_gate(drone, dt)
 
     if _timer >= FOLLOW_TIME:
         _done = True

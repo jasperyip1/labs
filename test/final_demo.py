@@ -98,6 +98,30 @@ GATE_SETTLE_FRAMES = 20
 GATE_CONFIRM_HITS  = 1  # min frames with tag in them for it to count as gate
 GATE_MIN_TAGS_TO_ADVANCE = 3   # min tags visible before "centered" can start counting toward CENTER_HOLD_T
 
+# -- Search-state drift hold --
+# While yawing to search for a lost gate, damp any residual body-frame
+# velocity (vx=right, vy=up, vz=forward) back toward zero instead of
+# sending zero commands and letting momentum/wind carry the drone. TUNE ME.
+SEARCH_HOLD_KP      = 0.15
+SEARCH_HOLD_KI      = 0.0
+SEARCH_HOLD_KD      = 0.02
+SEARCH_HOLD_I_LIMIT = 0.10
+SEARCH_HOLD_LIMIT   = 0.20   # cap on the hold correction itself, separate from ROLL_LIMIT/THROTTLE_LIMIT
+
+# -- Yaw-rate brake --
+# A commanded yaw of 0 stops ADDING spin, but doesn't actively kill existing
+# angular momentum from the search sweep. This actively brakes measured yaw
+# rate to zero during centering instead of just letting it decay on its own. TUNE ME.
+YAW_BRAKE_KP    = 0.5
+YAW_BRAKE_LIMIT = 0.5
+
+# -- Search start delay --
+# On first entering GATE_CENTER, hold still (no yaw) for this many seconds
+# before starting the SEARCH_YAW sweep, so a gate that's already in view
+# has time to actually be detected instead of getting yawed away from
+# immediately. TUNE ME.
+GATE_SEARCH_START_DELAY = 1.5
+
 FORWARD_MARGIN    = 1.0
 FORWARD_MAX_TIME  = 6.0
 
@@ -190,14 +214,18 @@ _hold           = 0.0
 _forward_time   = 0.0
 _forward_target = None
 _forward_dist   = 0.0
+_gate_center_time = 0.0   # time spent in the current GATE_CENTER session, for the search-start delay
 _gate_roll_pid = PID(GATE_ROLL_KP, GATE_ROLL_KI, GATE_ROLL_KD, ROLL_LIMIT, GATE_ROLL_I_LIMIT)
 _gate_alt_pid  = PID(GATE_ALT_KP,  GATE_ALT_KI,  GATE_ALT_KD,  THROTTLE_LIMIT, GATE_ALT_I_LIMIT)
+_search_roll_pid     = PID(SEARCH_HOLD_KP, SEARCH_HOLD_KI, SEARCH_HOLD_KD, SEARCH_HOLD_LIMIT, SEARCH_HOLD_I_LIMIT)
+_search_pitch_pid    = PID(SEARCH_HOLD_KP, SEARCH_HOLD_KI, SEARCH_HOLD_KD, SEARCH_HOLD_LIMIT, SEARCH_HOLD_I_LIMIT)
+_search_throttle_pid = PID(SEARCH_HOLD_KP, SEARCH_HOLD_KI, SEARCH_HOLD_KD, SEARCH_HOLD_LIMIT, SEARCH_HOLD_I_LIMIT)
 
 
 def reset():
     global _timer, _done, _frame, _mode
     global _line_state, _base_alt, _visible, _vis_timer, _settle_frame, _gate_confirm
-    global _gate_phase, _gate, _hold, _forward_time, _forward_target, _forward_dist
+    global _gate_phase, _gate, _hold, _forward_time, _forward_target, _forward_dist, _gate_center_time
 
     _timer = 0.0
     _done  = False
@@ -219,8 +247,12 @@ def reset():
     _forward_time   = 0.0
     _forward_target = None
     _forward_dist   = 0.0
+    _gate_center_time = 0.0
     _gate_roll_pid.reset()
     _gate_alt_pid.reset()
+    _search_roll_pid.reset()
+    _search_pitch_pid.reset()
+    _search_throttle_pid.reset()
 
 
 # ============================================================
@@ -356,7 +388,7 @@ def _detect_tag_distance(drone):
 # ============================================================
 def _update_line_follow(drone, dt):
     global _mode, _gate_phase, _hold, _forward_time, _forward_target, _forward_dist
-    global _gate_confirm
+    global _gate_confirm, _gate_center_time
 
     if _frame >= _settle_frame and _frame % GATE_CHECK_EVERY == 0:
         ids, dist = _detect_tag_distance(drone)
@@ -377,6 +409,7 @@ def _update_line_follow(drone, dt):
             _hold = 0.0
             _forward_time = 0.0
             _forward_dist = 0.0
+            _gate_center_time = 0.0
             _forward_target = (dist + FORWARD_MARGIN) if dist is not None else None
             _gate_confirm = 0
             _gate_roll_pid.reset()
@@ -412,7 +445,7 @@ def _update_line_follow(drone, dt):
 # ============================================================
 def _update_gate(drone, dt):
     global _mode, _gate_phase, _gate, _hold, _forward_time, _forward_dist
-    global _line_state, _base_alt, _visible, _vis_timer, _settle_frame, _gate_confirm
+    global _line_state, _base_alt, _visible, _vis_timer, _settle_frame, _gate_confirm, _gate_center_time
 
     if _gate_phase == GATE_CENTER:
         img = drone.camera.get_color_image()
@@ -421,19 +454,41 @@ def _update_gate(drone, dt):
             return
 
         _gate = neo_lab.detect_gate(img)
+        _gate_center_time += dt
 
         if _gate is None:
-            drone.flight.stop()
-            drone.flight.send_pcmd(0, 0, SEARCH_YAW, 0)
+            vx, vy, vz = (float(v) for v in drone.physics.get_linear_velocity())  # right, up, forward
+            hold_roll     = _search_roll_pid.update(-vx, dt)      # cancel lateral drift
+            hold_throttle = _search_throttle_pid.update(-vy, dt)  # cancel vertical drift
+            hold_pitch    = _search_pitch_pid.update(-vz, dt)     # cancel forward/back drift
+
+            if _gate_center_time < GATE_SEARCH_START_DELAY:
+                # Still settling in - hold position, no yaw yet, give detection a
+                # chance to catch a gate that's already in view.
+                drone.flight.send_pcmd(hold_pitch, hold_roll, 0, hold_throttle)
+                _hold = 0.0
+                _gate_roll_pid.hold()
+                _gate_alt_pid.hold()
+                if _frame % GATE_PRINT_EVERY == 0:
+                    print(f'[gate] settling before search ({_gate_center_time:.2f}/{GATE_SEARCH_START_DELAY}s) '
+                          f'| drift vx={vx:.3f} vy={vy:.3f} vz={vz:.3f}')
+                return
+
+            drone.flight.send_pcmd(hold_pitch, hold_roll, SEARCH_YAW, hold_throttle)
             _hold = 0.0
             _gate_roll_pid.hold()
             _gate_alt_pid.hold()
             if _frame % GATE_PRINT_EVERY == 0:
-                print('[gate] no gate found - searching...')
+                print(f'[gate] no gate found - searching | drift vx={vx:.3f} vy={vy:.3f} vz={vz:.3f} '
+                      f'| hold pitch={hold_pitch:.3f} roll={hold_roll:.3f} throttle={hold_throttle:.3f}')
             return
 
         width, height = drone.camera.get_width(), drone.camera.get_height()
         img_cx, img_cy = width / 2.0, height / 2.0
+
+        _search_roll_pid.hold()
+        _search_pitch_pid.hold()
+        _search_throttle_pid.hold()
 
         # normalized error in [-1, 1]: +err_x = gate right of center
         err_x = (_gate.cx - img_cx) / (width / 2.0)
@@ -443,11 +498,16 @@ def _update_gate(drone, dt):
         err_alt = (_gate.cy - img_cy) / (height / 2.0)
         throttle = _gate_alt_pid.update(-err_alt, dt)
 
-        drone.flight.send_pcmd(0, roll, 0, throttle)
+        # Actively brake any residual yaw rate left over from the search sweep,
+        # rather than just commanding 0 and waiting for momentum to decay.
+        yaw_rate = float(drone.physics.get_angular_velocity()[1])  # y-axis is yaw
+        yaw_brake = uav_utils.clamp(-YAW_BRAKE_KP * yaw_rate, -YAW_BRAKE_LIMIT, YAW_BRAKE_LIMIT)
+
+        drone.flight.send_pcmd(0, roll, yaw_brake, throttle)
 
         if _frame % GATE_PRINT_EVERY == 0:
             print(f'[gate] centering | gate=({_gate.cx:.0f},{_gate.cy:.0f}) tags={_gate.count} '
-                  f'err_x={err_x:.3f} err_alt={err_alt:.3f} '
+                  f'err_x={err_x:.3f} err_alt={err_alt:.3f} yaw_rate={yaw_rate:.3f} yaw_brake={yaw_brake:.3f} '
                   f'roll={roll:.3f} throttle={throttle:.3f} hold={_hold:.2f}')
 
         enough_tags = _gate.count >= GATE_MIN_TAGS_TO_ADVANCE

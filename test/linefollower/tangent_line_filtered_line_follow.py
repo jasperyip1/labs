@@ -66,6 +66,13 @@ IMG_W, IMG_H = 640, 480
 TARGET_POINT = (IMG_W / 2, IMG_H / 2 - 80)   # (x, y) — "slightly higher" than center
 SAMPLE_STEP = 2           # px spacing when scanning the curve for the closest point
 
+# -- Tangent-point smoothing (fixes yaw sign-flips on sharp corners) --------
+CONTINUITY_WEIGHT = 0.25   # how strongly to penalize the closest-point search
+                          # from jumping to a different point than last frame.
+                          # 0 = old behavior (pure distance-to-target). TUNE.
+M_TAU = 0.12              # low-pass time constant (s) for the tangent slope m.
+                          # Bigger = smoother but more lag. TUNE alongside D_TAU.
+
 
 # -- PID controller ---------------------------------------------------------
 class PID:
@@ -140,38 +147,51 @@ _base_alt  = None
 _visible   = True
 _vis_timer = 0.0
 
+_prev_y0 = None   # last frame's tangent-point row, for continuity biasing
+_m_filt  = 0.0    # low-passed tangent slope
+
 _yaw_pid  = PID(YAW_KP,  YAW_KI,  YAW_KD,  MAX_YAW,  YAW_I_LIMIT)
 _roll_pid = PID(ROLL_KP, ROLL_KI, ROLL_KD, MAX_ROLL, ROLL_I_LIMIT)
 
 
 def reset():
     global _timer, _done, _state, _base_alt, _visible, _vis_timer
+    global _prev_y0, _m_filt
     _timer = 0.0
     _done  = False
     _state     = FOLLOWING
     _base_alt  = None
     _visible   = True
     _vis_timer = 0.0
+    _prev_y0 = None
+    _m_filt  = 0.0
     _yaw_pid.reset()
     _roll_pid.reset()
 
 
 # -- Perception -------------------------------------------------------------
-def find_edge(drone):
+def find_edge(drone, dt):
     """
     Grab the downward image, threshold it, and fit a polynomial to the bright
     pixels (column as a function of row: x = f(y)).
 
     Finds the point on the fitted curve closest to TARGET_POINT (image center,
-    or a bit above it), then returns the tangent line to the curve at that
-    point in the same (m, b) format as before: column = m * row + b.
+    or a bit above it), biased toward staying near last frame's point so the
+    tracked point can't hop across the curve when two points are briefly
+    equidistant from the target (this was the source of the yaw sign-flips
+    on sharp corners). The resulting tangent slope is then low-pass filtered
+    before being returned, since even a continuity-biased search can still
+    shift a little frame to frame on a noisy fit.
 
     Returns (ys, xs, m, b, poly, closest_pt) where `poly` is the fitted
     np.poly1d (used downstream for a curvature/straightness measure that
-    reflects the actual fit, not just the local tangent), and closest_pt is
-    the (row, col) point used for the tangent. Returns None if there aren't
+    reflects the actual fit, not just the local tangent), m/b describe the
+    *filtered* tangent line (column = m*row + b), and closest_pt is the
+    (row, col) point used before filtering. Returns None if there aren't
     enough bright pixels to trust.
     """
+    global _prev_y0, _m_filt
+
     camera = drone.camera.get_downward_image()
     mask = neo_lab.bright_mask_improved(camera, V_MIN)
     edges = np.argwhere(mask)
@@ -196,12 +216,30 @@ def find_edge(drone):
 
     target_x, target_y = TARGET_POINT
     dist_sq = (sample_xs - target_x) ** 2 + (sample_ys - target_y) ** 2
+
+    # Continuity bias: penalize points far from where we were tracking last
+    # frame, so the selection can't teleport to a different branch of the
+    # curve just because it's momentarily closer to the target.
+    if _prev_y0 is not None:
+        dist_sq = dist_sq + CONTINUITY_WEIGHT * (sample_ys - _prev_y0) ** 2
+
     best_idx = np.argmin(dist_sq)
     y0 = sample_ys[best_idx]
     x0 = sample_xs[best_idx]
+    _prev_y0 = y0
 
-    # Tangent line to the curve at (y0, x0): column = m * row + b
-    m = poly_deriv(y0)
+    # Raw tangent slope at the selected point.
+    m_raw = poly_deriv(y0)
+
+    # Low-pass the slope itself — this is what actually feeds the yaw PID,
+    # so filtering here (not just the point selection) catches noise that
+    # continuity-biasing alone doesn't.
+    if dt > 0.0:
+        alpha = dt / (M_TAU + dt)
+        _m_filt += alpha * (m_raw - _m_filt)
+    else:
+        _m_filt = m_raw
+    m = _m_filt
     b = x0 - m * y0
 
     return ys, xs, m, b, poly, (y0, x0)
@@ -291,7 +329,7 @@ def update(drone):
     if _done:
         return True
     dt  = drone.get_delta_time()
-    fit = find_edge(drone)
+    fit = find_edge(drone, dt)
     throttle = set_throttle(drone, fit, dt)
 
     if fit is None:

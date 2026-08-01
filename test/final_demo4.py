@@ -38,8 +38,8 @@ TWO REGIMES, NOT ONE
 
             Progress is dead-reckoned by integrating forward speed, since this
             airframe has no position source, and the blind period is hard-capped
-            no time limit -- the crossing ends only when that distance says
-            the drone is clear.
+            the crossing ends when that distance says the drone is clear,
+            with a derived timeout as a backstop for a dead velocity signal.
 
             This subsumes final_demo3's altitude "latch": same trigger distance,
             same frozen altitude, but one entry and one exit instead of two that
@@ -81,8 +81,9 @@ CALIBRATION
                          clear. Watch the d= field in the debug line against a
                          tape measure before trusting the 1.8 m trigger.
 
-  Neither of these can end the crossing early: it ends only when the integrated
-  distance says the drone is clear. They set WHERE it starts and HOW FAR it goes.
+  Neither of these can end the crossing early: it ends when the integrated
+  distance says the drone is clear, or on a derived timeout sized at roughly twice
+  that. They set WHERE it starts and HOW FAR it goes.
 """
 
 import math
@@ -317,6 +318,33 @@ GATE_PASS_FALLBACK_MPS = 0.25 # m/s assumed if get_linear_velocity() is unusable
                              # terminates when there is no velocity source, so it
                              # must not be zero.
 
+# -- Timeout: a BACKSTOP, not the exit condition ----------------------------
+# The crossing normally ends on dead-reckoned distance. This exists for one
+# failure: the velocity source reporting zero (or near-zero) forward speed
+# forever, which would otherwise leave the drone flying blind indefinitely.
+#
+# It is DERIVED at each commit from the distance actually being flown and the
+# speed the commanded pitch should produce, so it rescales automatically when
+# GATE_PASS_PITCH is tuned and cannot silently become too tight.
+#
+# The factor is deliberately generous, because the two failure directions are not
+# symmetric. Firing EARLY drops line following back on while the drone is still
+# inside the gate -- the exact failure this whole manoeuvre exists to prevent, and
+# what made a flat 7 s wrong. Firing LATE just means a few more seconds of blind
+# flight in a case where the sensors are already lying. So: err long.
+#
+# At the defaults -- 2.80 m at pitch 0.22 -> ~12.7 s expected -- this gives a
+# 25.5 s backstop. Raise GATE_PASS_PITCH to 0.40 and it becomes 14 s. The value
+# actually used is printed at every commit.
+GATE_PASS_SPEED_SCALE    = 1.0   # m/s per unit of pitch command. This is
+                                 # MAX_SPEED on the real drone (flight_real.py:29).
+                                 # The sim's send_pcmd is a tilt command and flies
+                                 # faster, so there the backstop is only ever more
+                                 # generous than needed.
+GATE_PASS_TIMEOUT_FACTOR = 2.0   # multiple of the expected crossing time
+GATE_PASS_TIMEOUT_MIN_S  = 8.0   # never shorter than this
+GATE_PASS_TIMEOUT_MAX_S  = 30.0  # never longer than this
+
 # Lateral trim during the pass. The drone strafes to keep the gate opening
 # centred while tags are still decoding, then holds zero once they leave frame.
 # Set GATE_PASS_ALIGN_KP = 0.0 to fly the pass on pure dead reckoning.
@@ -441,6 +469,7 @@ _pass_t = 0.0               # s since the commit
 _pass_dist = 0.0            # m travelled since the commit (velocity-integrated)
 _pass_need_m = 0.0          # m of travel required to be clear
 _pass_by_vel = False        # True if get_linear_velocity() is usable this pass
+_pass_timeout_s = 0.0       # derived backstop for the current crossing
 
 _dbg_t = 0.0
 
@@ -456,7 +485,7 @@ def reset():
     global _prev_y0, _m_filt, _m_valid
     global _gate_streak, _gate_seen_t, _gate_blend, _last_obs
     global _gate_target_alt, _recommit_t, _dbg_t
-    global _passing, _pass_t, _pass_dist, _pass_need_m, _pass_by_vel
+    global _passing, _pass_t, _pass_dist, _pass_need_m, _pass_by_vel, _pass_timeout_s
     _timer = 0.0
     _done = False
     _state = FOLLOWING
@@ -478,6 +507,7 @@ def reset():
     _pass_dist = 0.0
     _pass_need_m = 0.0
     _pass_by_vel = False
+    _pass_timeout_s = 0.0
     _dbg_t = 0.0
     _yaw_pid.reset()
     _roll_pid.reset()
@@ -987,7 +1017,7 @@ def _commit_pass(drone, obs, alt):
     for.
     """
     global _passing, _pass_t, _pass_dist, _pass_need_m, _pass_by_vel
-    global _gate_target_alt
+    global _gate_target_alt, _pass_timeout_s
 
     f_px = _focal_px(obs.img_w)
     err_px = obs.cy - max(obs.img_h * 0.5, 1.0)
@@ -1001,6 +1031,19 @@ def _commit_pass(drone, obs, alt):
     _pass_dist = 0.0
     _pass_need_m = obs.dist_m + GATE_PASS_CLEAR_M
 
+    # Backstop, sized from THIS crossing's distance and the commanded pitch, so it
+    # can never be tighter than the crossing it is guarding.
+    expect_s = _pass_need_m / max(GATE_PASS_PITCH * GATE_PASS_SPEED_SCALE, 1e-3)
+    _pass_timeout_s = uav_utils.clamp(GATE_PASS_TIMEOUT_FACTOR * expect_s,
+                                      GATE_PASS_TIMEOUT_MIN_S, GATE_PASS_TIMEOUT_MAX_S)
+    if _pass_timeout_s < 1.5 * expect_s:
+        # The clamp has eaten the safety margin -- this is the configuration that
+        # makes a timeout dangerous rather than protective, so say so out loud.
+        print(f"[gate] WARNING: backstop {_pass_timeout_s:.0f}s is close to the "
+              f"{expect_s:.0f}s this crossing is expected to take. It may end the "
+              f"pass inside the gate. Raise GATE_PASS_TIMEOUT_MAX_S or "
+              f"GATE_PASS_PITCH.")
+
     # Decide the progress source ONCE, here. Switching mid-pass would make the
     # travelled distance jump.
     _pass_by_vel = False
@@ -1013,7 +1056,8 @@ def _commit_pass(drone, obs, alt):
     src = "velocity" if _pass_by_vel else f"dead reckoning @{GATE_PASS_FALLBACK_MPS}m/s"
     print(f"[gate] COMMIT at {obs.dist_m:.2f}m conf={obs.conf:.2f}: line following "
           f"OFF, flying {_pass_need_m:.2f}m forward on {src}, "
-          f"alt target {_gate_target_alt:.2f}m (rise {rise_m:+.2f}m)")
+          f"alt target {_gate_target_alt:.2f}m (rise {rise_m:+.2f}m), "
+          f"backstop {_pass_timeout_s:.0f}s")
 
 
 def _pass_progress(drone, dt):
@@ -1021,9 +1065,8 @@ def _pass_progress(drone, dt):
     Metres travelled since the commit, by integrating forward speed.
 
     There is no position source on this airframe, so this is dead reckoning and it
-    drifts, and it is the ONLY exit condition -- there is no time limit. If the
-    velocity source reads zero forward speed forever the crossing never ends, so
-    GATE_PASS_FALLBACK_MPS must stay non-zero for the no-velocity case.
+    drifts. It is the PRIMARY exit condition; the derived timeout in _commit_pass
+    is only a backstop for a velocity source that reads zero forever.
     """
     global _pass_dist
     if _pass_by_vel:
@@ -1078,6 +1121,7 @@ def _end_pass(alt, why):
     it, a later line loss descends all the way back to launch height.
     """
     global _passing, _pass_t, _pass_dist, _pass_need_m, _gate_target_alt
+    global _pass_timeout_s
     global _recommit_t, _base_alt, _state, _visible, _vis_timer
     global _prev_y0, _m_valid
 
@@ -1085,6 +1129,7 @@ def _end_pass(alt, why):
     _pass_t = 0.0
     _pass_dist = 0.0
     _pass_need_m = 0.0
+    _pass_timeout_s = 0.0
     _gate_target_alt = None
     _recommit_t = 0.0
 
@@ -1184,6 +1229,14 @@ def update(drone):
         travelled = _pass_progress(drone, dt)
         if travelled >= _pass_need_m:
             _end_pass(alt, f"{travelled:.2f}m travelled in {_pass_t:.1f}s")
+        elif _pass_t >= _pass_timeout_s:
+            # Should be unreachable on a healthy crossing -- the distance exit
+            # fires at roughly half this. Getting here means forward speed was
+            # read as ~zero throughout, so the distance below is not trustworthy.
+            print(f"[gate] WARNING: crossing timed out after {_pass_t:.1f}s with "
+                  f"only {travelled:.2f}m of {_pass_need_m:.2f}m dead-reckoned. "
+                  f"Check get_linear_velocity(); the drone may still be in the gate.")
+            _end_pass(alt, f"TIMEOUT at {travelled:.2f}m of {_pass_need_m:.2f}m")
     else:
         _recommit_t += dt
         if _should_commit(obs):
@@ -1202,6 +1255,8 @@ def update(drone):
     # ---- Command
     m = 0.0
     edge_col = float(IMAGE_CENTER)
+    closest_pt = (0.0, 0.0)     # only read by the debug print; bound here so a
+                                # future reorder cannot turn it into a NameError
     if _passing:
         # The gate owns EVERY axis. This is the whole point of the manoeuvre: the
         # line is not trustworthy this close to a white gate, so it is not
@@ -1255,7 +1310,7 @@ def update(drone):
             gate_s = (f"gate n={obs.count} conf={obs.conf:.2f}/{obs.conf_x:.2f} "
                       f"cy={obs.cy:.0f} cx={obs.cx:.0f} d={d}")
         if _passing:
-            gate_s += (f" PASS {_pass_t:.1f}s "
+            gate_s += (f" PASS {_pass_t:.1f}/{_pass_timeout_s:.0f}s "
                        f"{_pass_dist:.2f}/{_pass_need_m:.2f}m")
         print(f"{line_s} | {gate_s} | P={pitch:+.3f} R={roll:+.3f} "
               f"Y={yaw:+.3f} T={throttle:+.3f} (blend={_gate_blend:.2f}) "
@@ -1282,7 +1337,8 @@ if __name__ == "__main__":
               f"focal={_focal_px(IMG_W):.0f}px")
         print(f"  commit at {GATE_COMMIT_DIST_M:.2f}m -> fly "
               f"{GATE_COMMIT_DIST_M + GATE_PASS_CLEAR_M:.2f}m blind at pitch "
-              f"{GATE_PASS_PITCH:.2f}, exit on dead-reckoned distance only")
+              f"{GATE_PASS_PITCH:.2f}, exit on dead-reckoned distance "
+              f"(backstop ~{uav_utils.clamp(GATE_PASS_TIMEOUT_FACTOR * (GATE_COMMIT_DIST_M + GATE_PASS_CLEAR_M) / max(GATE_PASS_PITCH * GATE_PASS_SPEED_SCALE, 1e-3), GATE_PASS_TIMEOUT_MIN_S, GATE_PASS_TIMEOUT_MAX_S):.0f}s)")
         if not GATE_TAG_ROLE_BY_ID:
             print("  tag roles: learning online (fill GATE_TAG_ROLE_BY_ID to skip)")
 

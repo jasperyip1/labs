@@ -38,7 +38,8 @@ TWO REGIMES, NOT ONE
 
             Progress is dead-reckoned by integrating forward speed, since this
             airframe has no position source, and the blind period is hard-capped
-            at GATE_PASS_SECONDS regardless of what the integral says.
+            no time limit -- the crossing ends only when that distance says
+            the drone is clear.
 
             This subsumes final_demo3's altitude "latch": same trigger distance,
             same frozen altitude, but one entry and one exit instead of two that
@@ -80,8 +81,8 @@ CALIBRATION
                          clear. Watch the d= field in the debug line against a
                          tape measure before trusting the 1.8 m trigger.
 
-  See the GATE_PASS_PITCH note about how far 7 s of blind flight actually carries
-  the real drone -- the default pitch does not clear the gate within the timeout.
+  Neither of these can end the crossing early: it ends only when the integrated
+  distance says the drone is clear. They set WHERE it starts and HOW FAR it goes.
 """
 
 import math
@@ -303,22 +304,18 @@ GATE_COMMIT_MIN_CONF = 0.90  # min gate confidence to commit. Defaults to the
 GATE_PASS_CLEAR_M    = 1.00  # m past the gate plane before line following resumes
 
 GATE_PASS_PITCH      = PITCH_STRAIGHT   # forward command held through the pass.
-                             # SPEED ARITHMETIC, real drone: send_pcmd pitch maps
-                             # to pitch * MAX_SPEED m/s and MAX_SPEED is 1.0
-                             # (flight_real.py:29). At 0.22 that is 0.22 m/s, so
-                             # clearing 1.80 + 1.00 = 2.80 m takes ~12.7 s -- far
-                             # longer than GATE_PASS_SECONDS below, which means the
-                             # timeout would end the pass INSIDE the gate. To clear
-                             # 2.80 m within 7 s this needs to be ~0.40. The sim's
-                             # send_pcmd is a tilt command and flies faster, so it
-                             # exits on distance long before the timeout. See the
-                             # note in _end_pass about which exit actually fired.
-GATE_PASS_SECONDS    = 7.0   # s. Hard cap on the blind period. The pass ends at
-                             # whichever comes first: the integrated distance below
-                             # reaching target, or this.
-GATE_PASS_MIN_S      = 0.30  # s. Floor, so a momentary bad velocity read cannot
-                             # end the pass the frame after it starts.
-GATE_PASS_FALLBACK_MPS = 0.25 # m/s assumed if get_linear_velocity() is unusable
+                             # On the real drone send_pcmd pitch maps to
+                             # pitch * MAX_SPEED m/s with MAX_SPEED = 1.0
+                             # (flight_real.py:29), so 0.22 is 0.22 m/s and the
+                             # 2.80 m crossing takes ~12.7 s. That is slow but it
+                             # is CORRECT: the pass ends on distance covered, so a
+                             # low pitch only makes the crossing longer, never
+                             # shorter than the gate. Raise it to fly through
+                             # faster, not to make the exit work.
+GATE_PASS_FALLBACK_MPS = 0.25 # m/s assumed if get_linear_velocity() is unusable.
+                             # This is the ONLY thing that guarantees the crossing
+                             # terminates when there is no velocity source, so it
+                             # must not be zero.
 
 # Lateral trim during the pass. The drone strafes to keep the gate opening
 # centred while tags are still decoding, then holds zero once they leave frame.
@@ -1024,8 +1021,9 @@ def _pass_progress(drone, dt):
     Metres travelled since the commit, by integrating forward speed.
 
     There is no position source on this airframe, so this is dead reckoning and it
-    drifts. That is what GATE_PASS_SECONDS is for -- it bounds the blind period
-    regardless of what the integral says.
+    drifts, and it is the ONLY exit condition -- there is no time limit. If the
+    velocity source reads zero forward speed forever the crossing never ends, so
+    GATE_PASS_FALLBACK_MPS must stay non-zero for the no-velocity case.
     """
     global _pass_dist
     if _pass_by_vel:
@@ -1184,14 +1182,8 @@ def update(drone):
     if _passing:
         _pass_t += dt
         travelled = _pass_progress(drone, dt)
-        if _pass_t >= GATE_PASS_MIN_S and travelled >= _pass_need_m:
-            _end_pass(alt, f"{travelled:.2f}m travelled")
-        elif _pass_t >= GATE_PASS_SECONDS:
-            # Hit the clock before the integrator said we were clear. On the real
-            # drone at PITCH 0.22 this is the NORMAL exit, and it means the pass
-            # ended after ~1.5m of travel -- see the GATE_PASS_PITCH note.
-            _end_pass(alt, f"{GATE_PASS_SECONDS:.1f}s timeout at {travelled:.2f}m "
-                           f"of {_pass_need_m:.2f}m")
+        if travelled >= _pass_need_m:
+            _end_pass(alt, f"{travelled:.2f}m travelled in {_pass_t:.1f}s")
     else:
         _recommit_t += dt
         if _should_commit(obs):
@@ -1263,7 +1255,7 @@ def update(drone):
             gate_s = (f"gate n={obs.count} conf={obs.conf:.2f}/{obs.conf_x:.2f} "
                       f"cy={obs.cy:.0f} cx={obs.cx:.0f} d={d}")
         if _passing:
-            gate_s += (f" PASS {_pass_t:.1f}/{GATE_PASS_SECONDS:.1f}s "
+            gate_s += (f" PASS {_pass_t:.1f}s "
                        f"{_pass_dist:.2f}/{_pass_need_m:.2f}m")
         print(f"{line_s} | {gate_s} | P={pitch:+.3f} R={roll:+.3f} "
               f"Y={yaw:+.3f} T={throttle:+.3f} (blend={_gate_blend:.2f}) "
@@ -1290,7 +1282,7 @@ if __name__ == "__main__":
               f"focal={_focal_px(IMG_W):.0f}px")
         print(f"  commit at {GATE_COMMIT_DIST_M:.2f}m -> fly "
               f"{GATE_COMMIT_DIST_M + GATE_PASS_CLEAR_M:.2f}m blind at pitch "
-              f"{GATE_PASS_PITCH:.2f}, capped at {GATE_PASS_SECONDS:.1f}s")
+              f"{GATE_PASS_PITCH:.2f}, exit on dead-reckoned distance only")
         if not GATE_TAG_ROLE_BY_ID:
             print("  tag roles: learning online (fill GATE_TAG_ROLE_BY_ID to skip)")
 

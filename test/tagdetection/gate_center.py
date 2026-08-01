@@ -28,7 +28,7 @@ import cv2
 
 # ---- your course framework ----
 import drone_core            # noqa: F401  (adjust imports to match your other scripts)
-import neo_lab                # noqa: F401
+# import neo_lab                # noqa: F401
 import d435_intrinsics        # nominal D435 color-camera intrinsics (no pyrealsense2)
 
 # =============================================================================

@@ -1,359 +1,397 @@
-#!/usr/bin/env python3
 """
-gate_center.py -- ArUco (5x5) gate centering + fly-through for the UAV Neo Final Challenge.
+MIT BWSI Autonomous Drone Racing Course - UAV Neo
+GNU General Public License v3.0
 
-A 5x5 ArUco tag is mounted at each of the four points of the gate -- top, bottom, left,
-and right (a DIAMOND layout, not corners). Given the gate geometry (which ID is at which
-point, the gate size, and the tag size) we can build a 3D model of the gate. Each
-*visible* tag contributes 4 image<->3D corner correspondences,
-which is enough for cv2.solvePnP(SOLVEPNP_IPPE) -- so ONE tag is sufficient to recover
-the full gate pose. solvePnP returns tvec = gate CENTER in camera coordinates, so the
-drone can center on the true gate center even when it only sees a single corner tag.
+Gate Centering — single-tag capable.
 
-State machine:
-  ALIGN  -- P-control roll (lateral), throttle (vertical), yaw (heading) to drive the
-            gate center onto the optical axis. Pitch held at 0.
-  COMMIT -- once centered for N consecutive frames, dead-reckon forward by integrating
-            get_linear_velocity() until we've traveled the last-seen distance + margin.
-  DONE   -- stop.
+  no tags seen  -> yaw at SEARCH_YAW until tags appear
+  ONE tag seen  -> solvePnP: rvec aligns yaw, tvec centers on the GATE center
+  2+ tags seen  -> same pixel-centroid logic as final_demo.py
 
-Camera convention (OpenCV): +X right, +Y down, +Z forward (into scene).
-Flight convention (send_pcmd): pitch>0 fwd, roll>0 ?, yaw normalized (*MAX_YAW_RATE), throttle raw.
-Signs marked [SIGN?] must be confirmed on the field -- flip the sign if it drives the wrong way.
+The single-tag case works because each tag's 4 image corners are paired with their
+true 3D positions in the GATE frame (tag center offset by the gate geometry, then
++/- half a tag). So solvePnP returns the pose of the *gate*, not the tag -- and
+projecting the gate origin back into the image gives the true gate center even
+when only one corner tag is visible.
+
+Centering only. No fly-through (add GATE_FORWARD from final_demo.py once this works).
 """
 
-import time
-import numpy as np
+import drone_core
+import drone_utils as uav_utils
 import cv2
+import numpy as np
 
-# ---- your course framework ----
-import drone_core            # noqa: F401  (adjust imports to match your other scripts)
-# import neo_lab                # noqa: F401
-import d435_intrinsics        # nominal D435 color-camera intrinsics (no pyrealsense2)
+# -- Course setup: makes the shared `neo_lab` helper importable. --
+import os as _os, sys as _sys
+_d = _os.path.dirname(_os.path.realpath(__file__))
+while _os.path.basename(_d) != "labs" and _os.path.dirname(_d) != _d:
+    _d = _os.path.dirname(_d)
+if _d not in _sys.path:
+    _sys.path.insert(0, _d)
+import neo_lab
 
-# =============================================================================
-# CONFIG -- edit these to match the physical gate and your camera
-# =============================================================================
-
-# 5x5 ArUco dictionary the tags were printed from.
+# ============================================================
+# ArUco detector
+# ============================================================
+# These gates carry 5x5 tags. NOTE: neo_lab._detect_gate_markers() and
+# neo_lab.detect_gate() are bound to the course's DICT_6X6_250, so they return
+# *nothing* on 5x5 tags -- silently, as "no gate" rather than as an error. That's
+# why this script runs its own detector instead of the course helper.
+# If you ever point this at the sim's 6x6 gates, flip this one constant.
 ARUCO_DICT = cv2.aruco.DICT_5X5_250
 
-# Which marker ID sits at which point of the diamond, as seen by an upright drone
-# approaching the front face. Change the IDs to your actual tags.
-GATE_ID_TOP    = 0
-GATE_ID_BOTTOM = 1
-GATE_ID_LEFT   = 2
-GATE_ID_RIGHT  = 3
+try:                                  # OpenCV >= 4.7 (yours is 4.8.1)
+    _adict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT)
+    _aparams = cv2.aruco.DetectorParameters()
+    _detector = cv2.aruco.ArucoDetector(_adict, _aparams)
 
-# Gate geometry, in METERS.
-#   GATE_W = horizontal distance between the LEFT and RIGHT tag centers (full width).
-#   GATE_H = vertical distance between the TOP and BOTTOM tag centers (full height).
-#   TAG_SIZE = printed marker side length.
-GATE_W   = 1.20
-GATE_H   = 1.20
+    def _detect_markers(gray):
+        return _detector.detectMarkers(gray)
+except AttributeError:                # older OpenCV fallback
+    _adict = cv2.aruco.Dictionary_get(ARUCO_DICT)
+    _aparams = cv2.aruco.DetectorParameters_create()
+
+    def _detect_markers(gray):
+        return cv2.aruco.detectMarkers(gray, _adict, parameters=_aparams)
+
+
+# ============================================================
+# Gate geometry
+# ============================================================
+# Diamond layout: one tag at each of top / bottom / left / right.
+ID_TOP, ID_BOTTOM, ID_LEFT, ID_RIGHT = 32, 34, 35, 33
+
+# [CONFIRM] 1.8 m is taken as the TAG-CENTER-to-TAG-CENTER span (top tag center to
+# bottom tag center, and left to right). If 1.8 is instead the gate's open aperture,
+# the tag centers sit slightly outside that -- adjust here.
+GATE_W = 1.8
+GATE_H = 1.8
+
+# [MEASURE THIS] Printed side length of one ArUco tag, in METERS -- the black border
+# square, edge to edge. This sets the metric SCALE of the single-tag solution: if it's
+# wrong, tvec (and therefore the reported distance) is wrong by the same ratio.
+# Centering direction still works, but the distance print will lie.
 TAG_SIZE = 0.15
 
-# In-plane rotation of each tag about its own center, in DEGREES. Leave at 0 if the
-# tags are mounted upright (readable) at the diamond points. Set to 45 only if the
-# tags themselves are physically rotated into diamonds.
-TAG_INPLANE_ROT_DEG = 0.0
-
-# Forward-camera (D435 COLOR stream) intrinsics. Derived from the D435's published spec
-# FOV + the library's own get_width()/get_height() -- see d435_intrinsics.py. No
-# pyrealsense2 needed: drone.camera already gives us color + depth directly.
-# CAMERA_MATRIX / DIST_COEFFS below are placeholders; run() overwrites them at startup
-# via d435_intrinsics.get_intrinsics(drone.camera.get_width(), drone.camera.get_height()).
-CAMERA_MATRIX = np.array([[600.0,   0.0, 320.0],
-                          [  0.0, 600.0, 240.0],
-                          [  0.0,   0.0,   1.0]], dtype=np.float64)
-DIST_COEFFS   = np.zeros((5, 1), dtype=np.float64)   # D435 color stream is pre-rectified
-
-# ---- depth-based ranging (D435, via drone.camera.get_depth_image()) ----
-# The fly-through distance comes from the depth image sampled at the TAG pixels (real
-# surfaces on the gate plane), not the gate center (an opening -> invalid/background).
-# This gives an absolute gate-plane distance independent of solvePnP scale. Falls back
-# to solvePnP tz if no valid depth is available.
-# NOTE: get_depth_image() returns cm (per the library docs); everything below is in
-# METERS, so get_frame() converts once at the source.
-USE_DEPTH_RANGE = True
-DEPTH_PATCH     = 5      # px window (odd) median-sampled at each tag pixel
-DEPTH_MIN_M     = 0.20   # valid depth clamp (m); D435 min range ~0.2 m
-DEPTH_MAX_M     = None   # set at runtime from drone.camera.get_max_range() (cm -> m)
-
-
-
-# ---- control gains / limits (normalized command units, like your line follower) ----
-KP_ROLL   = 0.60     # roll per meter of lateral error
-KP_THR    = 0.40     # throttle per meter of vertical error
-KP_YAW    = 0.80     # normalized yaw per radian of heading error
-THR_HOVER = 0.0      # hover throttle offset for send_pcmd (match your altitude scripts)
-
-MAX_ROLL  = 0.25
-MAX_YAW   = 1.0      # normalized; actual rad/s = MAX_YAW * MAX_YAW_RATE in flight_real
-MAX_THR   = 0.40
-PITCH_CRUISE = 0.15  # forward pitch during the fly-through (your line-follower cruise)
-
-# ---- "centered" thresholds ----
-TOL_XY   = 0.10      # meters, lateral + vertical
-TOL_YAW  = 0.12      # radians (~7 deg)
-CENTERED_FRAMES = 8  # consecutive good frames required before committing
-
-# ---- fly-through ----
-GATE_PASS_MARGIN = 0.60   # meters past the gate plane to guarantee clearance
-VEL_FWD_INDEX    = 0      # [CONFIRM] index of forward axis in get_linear_velocity()
-FLYTHROUGH_TIMEOUT = 6.0  # s, hard escape hatch so we never dead-reckon forever
-
-SUMMARY_PERIOD = 0.5      # s between status prints (no per-frame spam)
-
-
-# =============================================================================
-# GATE MODEL  (3D tag centers in the gate frame; +X right, +Y down, Z=0 plane)
-# Diamond layout: tags at the top, bottom, left, and right points. Center = origin.
-# =============================================================================
+# Gate-frame tag centers: +X right, +Y down, Z = 0 (the gate plane), origin = gate center.
 ID_TO_CENTER = {
-    GATE_ID_TOP:    (0.0,          -GATE_H / 2.0, 0.0),
-    GATE_ID_BOTTOM: (0.0,          +GATE_H / 2.0, 0.0),
-    GATE_ID_LEFT:   (-GATE_W / 2.0, 0.0,          0.0),
-    GATE_ID_RIGHT:  (+GATE_W / 2.0, 0.0,          0.0),
+    ID_TOP:    (0.0,        -GATE_H / 2.0),
+    ID_BOTTOM: (0.0,        +GATE_H / 2.0),
+    ID_LEFT:   (-GATE_W / 2.0, 0.0),
+    ID_RIGHT:  (+GATE_W / 2.0, 0.0),
 }
 
+# ============================================================
+# Camera intrinsics (nominal, derived from FOV + resolution)
+# ============================================================
+# The library exposes no get_intrinsics(), so we derive a nominal pinhole matrix.
+# SIM and REAL are NOT the same camera model:
+#   sim   -- Unity renders square pixels at vertical FOV 42.5 deg -> fx == fy
+#   real  -- D435 color spec FOV is 69.4 x 42.5 deg -> fx != fy
+SIM_HFOV_DEG,  SIM_VFOV_DEG  = 54.8, 42.5   # Unity: 42.5 vertical, 4:3 -> 54.8 horizontal
+REAL_HFOV_DEG, REAL_VFOV_DEG = 69.4, 42.5   # Intel D435 color sensor spec
 
-def _tag_object_corners(cx, cy):
-    """4 corners of a tag centered at (cx,cy) in the gate plane, in detectMarkers
-    order: top-left, top-right, bottom-right, bottom-left. Honors TAG_INPLANE_ROT_DEG."""
+_K = None
+_D = np.zeros((5, 1), dtype=np.float64)     # both are rectified/pinhole -> no distortion
+
+
+def _init_intrinsics(drone):
+    """Build the camera matrix once, from the library's own reported resolution."""
+    global _K
+    w, h = drone.camera.get_width(), drone.camera.get_height()
+    if neo_lab._is_sim(drone):
+        hfov, vfov, tag = SIM_HFOV_DEG, SIM_VFOV_DEG, "sim"
+    else:
+        hfov, vfov, tag = REAL_HFOV_DEG, REAL_VFOV_DEG, "real"
+    fx = (w / 2.0) / np.tan(np.radians(hfov) / 2.0)
+    fy = (h / 2.0) / np.tan(np.radians(vfov) / 2.0)
+    _K = np.array([[fx, 0.0, w / 2.0],
+                   [0.0, fy, h / 2.0],
+                   [0.0, 0.0, 1.0]], dtype=np.float64)
+    print(f"[intrinsics] {tag} {w}x{h}  fx={fx:.1f} fy={fy:.1f} "
+          f"cx={w/2:.0f} cy={h/2:.0f}")
+
+
+# ============================================================
+# Control constants  (seeded from final_demo.py)
+# ============================================================
+GATE_ROLL_KP, GATE_ROLL_KI, GATE_ROLL_KD = 1.5, 0.0, 0.0
+GATE_ROLL_I_LIMIT = 0.10
+GATE_ALT_KP,  GATE_ALT_KI,  GATE_ALT_KD  = 0.3, 0.0, 0.0
+GATE_ALT_I_LIMIT  = 0.10
+
+ROLL_LIMIT     = 0.3
+THROTTLE_LIMIT = 0.3
+
+CENTER_TOL    = 0.05     # normalized image error
+ALT_TOL       = 0.05
+YAW_TOL       = 0.12     # rad (~7 deg), single-tag alignment only
+CENTER_HOLD_T = 0.5      # seconds held centered before declaring done
+
+SEARCH_YAW              = 0.2
+GATE_SEARCH_START_DELAY = 1.5    # settle before sweeping, so an in-view gate isn't yawed away
+
+# Single-tag yaw alignment (from rvec).
+YAW_ALIGN_KP    = 0.8
+YAW_ALIGN_LIMIT = 0.4
+
+# Multi-tag: brake residual yaw rate instead of just commanding 0 (final_demo behavior).
+YAW_BRAKE_KP    = 0.5
+YAW_BRAKE_LIMIT = 0.5
+
+# Search-state drift hold (final_demo behavior).
+SEARCH_HOLD_KP, SEARCH_HOLD_KI, SEARCH_HOLD_KD = 0.15, 0.0, 0.02
+SEARCH_HOLD_I_LIMIT = 0.10
+SEARCH_HOLD_LIMIT   = 0.20
+
+D_TAU = 0.10
+PRINT_EVERY = 5
+
+
+# ============================================================
+# PID (same as final_demo.py)
+# ============================================================
+class PID:
+    def __init__(self, kp, ki, kd, out_limit, i_limit, d_tau=D_TAU):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.out_limit, self.i_limit, self.d_tau = out_limit, i_limit, d_tau
+        self.reset()
+
+    def reset(self):
+        self._integral = 0.0
+        self._prev_error = None
+        self._deriv = 0.0
+
+    def hold(self):
+        self._prev_error = None
+
+    def update(self, error, dt):
+        if dt <= 0.0:
+            return uav_utils.clamp(self.kp * error, -self.out_limit, self.out_limit)
+        if self._prev_error is None:
+            raw_deriv = 0.0
+            self._deriv = 0.0
+        else:
+            raw_deriv = (error - self._prev_error) / dt
+        alpha = dt / (self.d_tau + dt)
+        self._deriv += alpha * (raw_deriv - self._deriv)
+        self._prev_error = error
+        integral = uav_utils.clamp(self._integral + error * dt, -self.i_limit, self.i_limit)
+        output = self.kp * error + self.ki * integral + self.kd * self._deriv
+        clamped = uav_utils.clamp(output, -self.out_limit, self.out_limit)
+        if not ((output != clamped) and output * error > 0):
+            self._integral = integral
+        return clamped
+
+
+# ============================================================
+# Module state
+# ============================================================
+_done = False
+_frame = 0
+_hold = 0.0
+_center_time = 0.0
+
+_roll_pid = PID(GATE_ROLL_KP, GATE_ROLL_KI, GATE_ROLL_KD, ROLL_LIMIT, GATE_ROLL_I_LIMIT)
+_alt_pid  = PID(GATE_ALT_KP,  GATE_ALT_KI,  GATE_ALT_KD,  THROTTLE_LIMIT, GATE_ALT_I_LIMIT)
+_search_roll_pid     = PID(SEARCH_HOLD_KP, SEARCH_HOLD_KI, SEARCH_HOLD_KD,
+                           SEARCH_HOLD_LIMIT, SEARCH_HOLD_I_LIMIT)
+_search_pitch_pid    = PID(SEARCH_HOLD_KP, SEARCH_HOLD_KI, SEARCH_HOLD_KD,
+                           SEARCH_HOLD_LIMIT, SEARCH_HOLD_I_LIMIT)
+_search_throttle_pid = PID(SEARCH_HOLD_KP, SEARCH_HOLD_KI, SEARCH_HOLD_KD,
+                           SEARCH_HOLD_LIMIT, SEARCH_HOLD_I_LIMIT)
+
+
+def reset():
+    global _done, _frame, _hold, _center_time
+    _done = False
+    _frame = 0
+    _hold = 0.0
+    _center_time = 0.0
+    _roll_pid.reset()
+    _alt_pid.reset()
+    _search_roll_pid.reset()
+    _search_pitch_pid.reset()
+    _search_throttle_pid.reset()
+
+
+# ============================================================
+# Perception
+# ============================================================
+def _tag_object_points(tag_id):
+    """The 4 corners of this tag, in GATE-frame meters, in detectMarkers order
+    (TL, TR, BR, BL). Tags assumed mounted upright at the diamond points."""
+    cx, cy = ID_TO_CENTER[tag_id]
     s = TAG_SIZE / 2.0
-    base = [(-s, -s), (+s, -s), (+s, +s), (-s, +s)]   # TL, TR, BR, BL
-    th = np.radians(TAG_INPLANE_ROT_DEG)
-    c, sn = np.cos(th), np.sin(th)
-    out = []
-    for dx, dy in base:
-        rx = c * dx - sn * dy
-        ry = sn * dx + c * dy
-        out.append((cx + rx, cy + ry, 0.0))
-    return out
+    return np.array([
+        [cx - s, cy - s, 0.0],
+        [cx + s, cy - s, 0.0],
+        [cx + s, cy + s, 0.0],
+        [cx - s, cy + s, 0.0],
+    ], dtype=np.float64)
 
 
-# =============================================================================
-# PERCEPTION
-# =============================================================================
-_aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT)
-_aruco_params = cv2.aruco.DetectorParameters()
-_detector = cv2.aruco.ArucoDetector(_aruco_dict, _aruco_params)
+def detect(drone):
+    """Returns (tag_centers, ids, corners) for gate tags only, or (None, None, None)."""
+    img = drone.camera.get_color_image()
+    if img is None:
+        return None, None, None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    corners, ids, _ = _detect_markers(gray)
+    if ids is None or len(ids) == 0:
+        return None, None, None
+
+    keep_c, keep_i = [], []
+    for c, i in zip(corners, ids.flatten()):
+        if int(i) in ID_TO_CENTER:
+            keep_c.append(c.reshape(-1, 2))
+            keep_i.append(int(i))
+    if not keep_i:
+        return None, None, None
+
+    centers = np.array([c.mean(axis=0) for c in keep_c])
+    return centers, keep_i, keep_c
 
 
-def _sample_depth_m(depth_m, u, v):
-    """Median valid depth (meters) in a small patch around pixel (u,v). None if invalid.
-    depth_m must be aligned-to-color and already in METERS."""
-    if depth_m is None:
-        return None
-    h, w = depth_m.shape[:2]
-    u, v = int(round(u)), int(round(v))
-    r = DEPTH_PATCH // 2
-    u0, u1 = max(0, u - r), min(w, u + r + 1)
-    v0, v1 = max(0, v - r), min(h, v + r + 1)
-    if u0 >= u1 or v0 >= v1:
-        return None
-    win = depth_m[v0:v1, u0:u1]
-    vals = win[(win > DEPTH_MIN_M) & (win < DEPTH_MAX_M)]
-    if vals.size < 3:
-        return None
-    return float(np.median(vals))
+def solve_single_tag(tag_corners, tag_id):
+    """solvePnP on ONE tag -> (gate_center_px, yaw_err_rad, distance_m) or None.
 
-
-def estimate_gate_pose(gray, depth_m=None):
-    """Detect gate tags and solve for the gate pose.
-
-    Returns (tx, ty, tz, yaw_err, n_tags, depth_range) or None if no usable tag seen.
-      tx  gate center offset right of optical axis (m)
-      ty  gate center offset below optical axis (m)   [camera Y is down]
-      tz  gate center forward distance from solvePnP (m)
-      yaw_err  heading misalignment of the gate plane (rad), 0 when square-on
-      depth_range  gate-plane distance from the DEPTH stream at the tag pixels (m),
-                   or None if depth unavailable/invalid. Prefer this over tz.
+    The object points are in the GATE frame, so the solution is the gate's pose.
+    Projecting the gate origin back into the image gives the true gate center --
+    which is generally NOT where the tag is.
     """
-    corners, ids, _ = _detector.detectMarkers(gray)
-    if ids is None:
-        return None
+    obj = _tag_object_points(tag_id)
+    img = np.array(tag_corners, dtype=np.float64)
 
-    obj_pts, img_pts, tag_pixels, n_tags = [], [], [], 0
-    for marker_corners, mid in zip(corners, ids.flatten()):
-        if int(mid) not in ID_TO_CENTER:
-            continue
-        cx, cy, _ = ID_TO_CENTER[int(mid)]
-        obj_pts.extend(_tag_object_corners(cx, cy))
-        c4 = marker_corners.reshape(-1, 2)
-        img_pts.extend(c4)                     # TL,TR,BR,BL image order
-        tag_pixels.append(c4.mean(axis=0))     # this tag's center pixel (a real surface)
-        n_tags += 1
-
-    if len(obj_pts) < 4:
-        return None
-
-    obj = np.array(obj_pts, dtype=np.float64)
-    img = np.array(img_pts, dtype=np.float64)
-
-    ok, rvec, tvec = cv2.solvePnP(
-        obj, img, CAMERA_MATRIX, DIST_COEFFS, flags=cv2.SOLVEPNP_IPPE
-    )
+    ok, rvec, tvec = cv2.solvePnP(obj, img, _K, _D, flags=cv2.SOLVEPNP_IPPE)
     if not ok:
         return None
 
-    tx, ty, tz = tvec.flatten()
+    # Gate center (gate-frame origin) projected into the image.
+    proj, _ = cv2.projectPoints(np.zeros((1, 3)), rvec, tvec, _K, _D)
+    gate_px = proj.reshape(2)
 
-    # Heading error: gate's X axis (right edge) expressed in camera frame.
-    # Square-on -> gate X aligns with camera X -> yaw_err ~ 0.
+    # Heading error: gate's X axis expressed in camera frame. Square-on -> ~0.
     R, _ = cv2.Rodrigues(rvec)
     yaw_err = float(np.arctan2(R[2, 0], R[0, 0]))
 
-    # Depth range: sample the depth stream at each detected tag pixel (real gate-plane
-    # surfaces) and take the median. Absolute, independent of solvePnP scale.
-    depth_range = None
-    if USE_DEPTH_RANGE and depth_m is not None:
-        ds = [d for (u, v) in tag_pixels if (d := _sample_depth_m(depth_m, u, v)) is not None]
-        if ds:
-            depth_range = float(np.median(ds))
-
-    return float(tx), float(ty), float(tz), yaw_err, n_tags, depth_range
+    return gate_px, yaw_err, float(tvec[2])
 
 
-# =============================================================================
-# CONTROL
-# =============================================================================
-def _clamp(v, lim):
-    return max(-lim, min(lim, v))
+# ============================================================
+# Main update
+# ============================================================
+def update(drone):
+    global _done, _frame, _hold, _center_time
+    if _done:
+        return True
+    if _K is None:
+        _init_intrinsics(drone)
 
+    dt = drone.get_delta_time()
+    _frame += 1
 
-def alignment_command(tx, ty, yaw_err):
-    """P-control mapping the gate-center offset to a send_pcmd command.
-    Returns (pitch, roll, yaw, throttle). Pitch is 0 during alignment."""
-    roll     = _clamp( KP_ROLL * tx,      MAX_ROLL)          # [SIGN?] gate right -> roll right
-    throttle = THR_HOVER + _clamp(KP_THR * (-ty), MAX_THR)   # [SIGN?] gate above (ty<0) -> climb
-    yaw      = _clamp( KP_YAW * yaw_err,  MAX_YAW)            # [SIGN?] rotate to face gate
-    pitch    = 0.0
-    return pitch, roll, yaw, throttle
+    width, height = drone.camera.get_width(), drone.camera.get_height()
+    img_cx, img_cy = width / 2.0, height / 2.0
 
+    centers, ids, corners = detect(drone)
 
-def is_centered(tx, ty, yaw_err):
-    return abs(tx) < TOL_XY and abs(ty) < TOL_XY and abs(yaw_err) < TOL_YAW
+    # ---------- no tags: hold position and sweep ----------
+    if ids is None:
+        _center_time += dt
+        vx, vy, vz = (float(v) for v in drone.physics.get_linear_velocity())  # right, up, forward
+        hold_roll     = _search_roll_pid.update(-vx, dt)
+        hold_throttle = _search_throttle_pid.update(-vy, dt)
+        hold_pitch    = _search_pitch_pid.update(-vz, dt)
 
+        yaw = 0.0 if _center_time < GATE_SEARCH_START_DELAY else SEARCH_YAW
+        drone.flight.send_pcmd(hold_pitch, hold_roll, yaw, hold_throttle)
 
-# =============================================================================
-# MAIN
-# =============================================================================
-def get_frame(drone):
-    """Grab a grayscale color frame + depth (meters) via drone.camera (uav-neo-library).
+        _hold = 0.0
+        _roll_pid.hold()
+        _alt_pid.hold()
+        if _frame % PRINT_EVERY == 0:
+            phase = "settling" if yaw == 0.0 else "searching"
+            print(f"[gate] no tags - {phase} | drift vx={vx:.2f} vy={vy:.2f} vz={vz:.2f}")
+        return False
 
-    drone.camera.get_color_image()  -> BGR forward image
-    drone.camera.get_depth_image()  -> per-pixel distance in CM, same forward camera,
-                                        already pixel-aligned with the color image
-    No pyrealsense2 needed -- the library wraps the D435 directly.
-    """
-    color = drone.camera.get_color_image()
-    gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY) if color.ndim == 3 else color
+    _search_roll_pid.hold()
+    _search_pitch_pid.hold()
+    _search_throttle_pid.hold()
 
-    depth_cm = drone.camera.get_depth_image()
-    depth_m = depth_cm.astype(np.float32) / 100.0 if depth_cm is not None else None
+    n = len(ids)
+    yaw_err = None
+    dist = None
 
-    return gray, depth_m
+    # ---------- ONE tag: solvePnP ----------
+    if n == 1:
+        sol = solve_single_tag(corners[0], ids[0])
+        if sol is None:
+            drone.flight.send_pcmd(0, 0, 0, 0)
+            if _frame % PRINT_EVERY == 0:
+                print(f"[gate] 1 tag (id={ids[0]}) but solvePnP failed")
+            return False
+        gate_px, yaw_err, dist = sol
+        gx, gy = float(gate_px[0]), float(gate_px[1])
+        yaw_cmd = uav_utils.clamp(YAW_ALIGN_KP * yaw_err, -YAW_ALIGN_LIMIT, YAW_ALIGN_LIMIT)
+        mode = f"pnp id={ids[0]}"
 
+    # ---------- 2+ tags: pixel centroid (final_demo logic) ----------
+    else:
+        gx, gy = float(centers[:, 0].mean()), float(centers[:, 1].mean())
+        yaw_rate = float(drone.physics.get_angular_velocity()[1])   # index 1 = yaw
+        yaw_cmd = uav_utils.clamp(-YAW_BRAKE_KP * yaw_rate, -YAW_BRAKE_LIMIT, YAW_BRAKE_LIMIT)
+        mode = f"centroid n={n}"
 
-def init_intrinsics(drone):
-    """Fetch stream dimensions from drone.camera and derive nominal D435 intrinsics
-    (spec FOV + resolution -- see d435_intrinsics.py). Also sets DEPTH_MAX_M from
-    the library's own get_max_range() (cm -> m) instead of a guessed constant."""
-    global CAMERA_MATRIX, DIST_COEFFS, DEPTH_MAX_M
-    w = drone.camera.get_width()
-    h = drone.camera.get_height()
-    CAMERA_MATRIX, DIST_COEFFS = d435_intrinsics.get_intrinsics(w, h)
-    DEPTH_MAX_M = drone.camera.get_max_range() / 100.0
-    print(f"[gate_center] intrinsics set for {w}x{h}, depth max range {DEPTH_MAX_M:.1f}m")
+    # ---------- shared centering control ----------
+    err_x   = (gx - img_cx) / (width / 2.0)     # + => gate is right of center
+    err_alt = (gy - img_cy) / (height / 2.0)    # + => gate is below center
 
+    roll     = _roll_pid.update(err_x, dt)
+    throttle = _alt_pid.update(-err_alt, dt)    # gate below -> climb
 
+    drone.flight.send_pcmd(0, roll, yaw_cmd, throttle)
 
+    if _frame % PRINT_EVERY == 0:
+        extra = ""
+        if yaw_err is not None:
+            extra = f" yaw_err={np.degrees(yaw_err):+.1f}deg dist={dist:.2f}m"
+        print(f"[gate] {mode} | center=({gx:.0f},{gy:.0f}) "
+              f"err_x={err_x:+.3f} err_alt={err_alt:+.3f} "
+              f"roll={roll:+.3f} yaw={yaw_cmd:+.3f} thr={throttle:+.3f} "
+              f"hold={_hold:.2f}{extra}")
 
-def run(drone):
-    init_intrinsics(drone)   # derive CAMERA_MATRIX/DIST_COEFFS + DEPTH_MAX_M from drone.camera
+    # ---------- centered? ----------
+    aligned = True if yaw_err is None else abs(yaw_err) < YAW_TOL
+    if abs(err_x) < CENTER_TOL and abs(err_alt) < ALT_TOL and aligned:
+        _hold += dt
+        if _hold >= CENTER_HOLD_T:
+            drone.flight.stop()
+            print(f"[gate] CENTERED ({mode})"
+                  + (f" at {dist:.2f}m" if dist is not None else ""))
+            _done = True
+    else:
+        _hold = 0.0
 
-    state = "ALIGN"
-    centered_streak = 0
-    last_range = None        # best available gate-plane distance (depth preferred)
-    last_summary = 0.0
-
-    # fly-through dead-reckoning accumulators
-    dist_traveled = 0.0
-    t_prev = None
-    t_commit = None
-
-    print("[gate_center] ALIGN: searching for gate tags...")
-
-    while True:
-        now = time.time()
-        gray, depth_m = get_frame(drone)
-        pose = estimate_gate_pose(gray, depth_m)
-
-        if state == "ALIGN":
-            if pose is None:
-                # No tag this frame -- hold level, keep looking. (No search sweep; minimal.)
-                drone.flight.send_pcmd(0.0, 0.0, 0.0, THR_HOVER)
-                centered_streak = 0
-            else:
-                tx, ty, tz, yaw_err, n, depth_range = pose
-                # Prefer the absolute depth measurement; fall back to solvePnP tz.
-                last_range = depth_range if depth_range is not None else tz
-                src = "depth" if depth_range is not None else "pnp"
-                pitch, roll, yaw, throttle = alignment_command(tx, ty, yaw_err)
-                drone.flight.send_pcmd(pitch, roll, yaw, throttle)
-
-                centered_streak = centered_streak + 1 if is_centered(tx, ty, yaw_err) else 0
-                if centered_streak >= CENTERED_FRAMES:
-                    state = "COMMIT"
-                    t_commit = now
-                    t_prev = now
-                    dist_traveled = 0.0
-                    target = (last_range or 0.0) + GATE_PASS_MARGIN
-                    print(f"[gate_center] CENTERED (tags={n}, range={last_range:.2f}m "
-                          f"[{src}]). COMMIT: flying through {target:.2f}m.")
-
-                if now - last_summary >= SUMMARY_PERIOD:
-                    print(f"[ALIGN] tags={n} tx={tx:+.2f} ty={ty:+.2f} "
-                          f"range={last_range:.2f}[{src}] tz={tz:.2f} "
-                          f"yaw={np.degrees(yaw_err):+5.1f}deg streak={centered_streak}")
-                    last_summary = now
-
-        elif state == "COMMIT":
-            # Dead-reckon forward through the gate: pitch and integrate forward velocity
-            # until we've covered the gate-plane distance + margin. Distance seed comes
-            # from the depth stream (absolute) when available, else solvePnP.
-            drone.flight.send_pcmd(PITCH_CRUISE, 0.0, 0.0, THR_HOVER)
-
-            vel = drone.get_linear_velocity()
-            v_fwd = float(vel[VEL_FWD_INDEX])
-            dt = now - t_prev
-            t_prev = now
-            dist_traveled += max(0.0, v_fwd) * dt
-
-            target = (last_range or 0.0) + GATE_PASS_MARGIN
-            if now - last_summary >= SUMMARY_PERIOD:
-                print(f"[COMMIT] traveled={dist_traveled:.2f}/{target:.2f}m v_fwd={v_fwd:+.2f}")
-                last_summary = now
-
-            if dist_traveled >= target or (now - t_commit) >= FLYTHROUGH_TIMEOUT:
-                reason = "distance" if dist_traveled >= target else "timeout"
-                print(f"[gate_center] DONE ({reason}). Stopping.")
-                drone.flight.stop()
-                state = "DONE"
-
-        if state == "DONE":
-            break
-
-        time.sleep(0.01)   # let the loop breathe; tune to your camera frame rate
+    return _done
 
 
 if __name__ == "__main__":
-    # Bring up the drone the same way your other field scripts do, then run().
-    #   drone = drone_core.Drone(...)      # <-- match your launcher / flight_real setup
-    #   neo_lab.Launcher(...) ...
-    #   run(drone)
-    raise SystemExit(
-        "Wire up the drone object (see your line-follower launch) and call run(drone)."
-    )
+    _drone = drone_core.create_drone()
+    _launcher = neo_lab.Launcher(1.4)
+
+    def start():
+        reset()
+        _launcher.reset()
+        print("Gate centering (single-tag solvePnP capable)")
+
+    def _update():
+        if not _launcher.done:
+            _launcher.update(_drone)
+            return
+        if update(_drone):
+            _drone.flight.land()
+
+    _drone.set_start_update(start, _update)
+    _drone.go(not neo_lab._is_sim(_drone))

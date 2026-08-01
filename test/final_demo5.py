@@ -21,28 +21,42 @@ This is a merge of two files:
                   and the opening centre is reconstructed from the geometry with a
                   confidence that scales control authority.
 
-TWO REGIMES, NOT ONE
+DIFFERENCE FROM final_demo4
+  final_demo4 flies EVERY gate blind. This version flies only the FIRST gate
+  blind; every other gate is crossed with line following still running. Which
+  gates get the blind treatment is set by BLIND_PASS_TAG_IDS below -- it holds
+  gate 1's four tag ids by default, so identification is by which gate is in
+  frame, not by how many have been counted. A miscount or a spurious early
+  detection therefore cannot shift the blind pass onto the wrong gate.
 
-  APPROACH  pitch, roll and yaw come from line following; the gate may only ever
-            influence THROTTLE. This is final_demo3's rule, and it holds whenever
-            the drone is further than GATE_COMMIT_DIST_M from a gate.
+THREE REGIMES
 
-  PASS      inside GATE_COMMIT_DIST_M (1.8 m) line following is switched OFF and
-            the gate owns every axis. The gate structure is WHITE, so from close
-            range it dominates the downward camera's bright mask and the line fit
-            starts tracking the gate itself. There is no filtering fix for that --
-            the gate really is a big bright blob. So the drone freezes its
-            heading, holds the altitude the gate implied, and flies forward on a
-            fixed pitch until it is GATE_PASS_CLEAR_M (1 m) past the gate plane,
-            then re-acquires the line.
+  APPROACH   pitch, roll and yaw come from line following; the gate may only ever
+             influence THROTTLE. This is final_demo3's rule, and it holds whenever
+             the drone is further than GATE_COMMIT_DIST_M from a gate.
 
-            Progress is dead-reckoned by integrating forward speed, since this
-            airframe has no position source, and the blind period is hard-capped
-            at GATE_PASS_SECONDS regardless of what the integral says.
+  BLIND      gate 1 only. Inside GATE_COMMIT_DIST_M (1.8 m) line following is
+             switched OFF and the gate owns every axis. The gate structure is
+             WHITE, so from close range it dominates the downward camera's bright
+             mask and the line fit starts tracking the gate itself. There is no
+             filtering fix for that -- the gate really is a big bright blob. So
+             the drone freezes its heading, holds the altitude the gate implied,
+             and flies forward on a fixed pitch until it is GATE_PASS_CLEAR_M
+             (1 m) past the gate plane, then re-acquires the line.
 
-            This subsumes final_demo3's altitude "latch": same trigger distance,
-            same frozen altitude, but one entry and one exit instead of two that
-            could disagree about when the gate had been passed.
+  LATCHED    every other gate, flown EXACTLY as final_demo3 flies it. Line
+             following keeps pitch/roll/yaw the whole way through; only throttle
+             is taken over. gate_throttle is demo3's function unchanged, latch and
+             all: image-space vertical centring on approach, then an absolute
+             altitude frozen at GATE_LATCH_DIST_M and released on demo3's
+             timeout/lost-detection conditions.
+
+  Altitude is adjusted for EVERY gate on EVERY lap regardless of which regime
+  applies -- that is gate_throttle's far-field PID, which runs on approach to all
+  four gates. The regimes differ only in what happens in the last ~1.5 m.
+
+  The blind crossing dead-reckons progress by integrating forward speed, since
+  this airframe has no position source, and is hard-capped at GATE_PASS_SECONDS.
 
 WHAT THE MERGE ITSELF CHANGED (neither parent had to deal with this)
 
@@ -272,12 +286,40 @@ GATE_ALT_HOLD_KP    = 0.35   # throttle per metre of altitude error during a pas
 GATE_MAX_ALT_STEP_M = 1.50   # m. Cap on how far one gate may move the target
                              # altitude -- a bad estimate cannot command a huge climb.
 
+GATE_LATCH_DIST_M   = 1.50   # m. Inside this range the vertical target is frozen
+                             # to an absolute altitude, because the tags are about
+                             # to leave the frame.
+GATE_LATCH_MAX_S    = 4.0    # s. Hard timeout so the latch can never hang.
+GATE_LATCH_EXIT_S   = 0.60   # s without any detection while latched -> assume the
+                             # gate has been passed. Must exceed GATE_LOST_HOLD_S.
+GATE_LATCH_MIN_CONF = 0.90   # min confidence to freeze an absolute altitude
+GATE_RELATCH_S      = 1.00   # s cooldown after a latch or a blind crossing ends,
+                             # so the gate just flown cannot immediately re-arm
+
 GATE_REBASELINE     = True   # after passing a gate, treat the new altitude as the
                              # reference the line-search FSM returns to
 
 
 # ===========================================================================
-# GATE PASS-THROUGH -- the blind commit
+# WHICH GATES ARE FLOWN BLIND
+# ===========================================================================
+# Tag ids belonging to the gates that get line following switched OFF for the
+# crossing. Any other gate is crossed with line following still flying
+# pitch/roll/yaw, and only its throttle taken over (see LATCHED above).
+#
+# Defaults to gate 1's four ids, taken from the "# Gate 1" row of
+# GATE_TAG_ROLE_BY_ID above. Keep the two in step if you renumber the course.
+# Add another gate's ids here to fly that one blind too; empty the set to keep
+# line following through every gate.
+#
+# Identification is by tag id rather than by counting crossings on purpose: a
+# spurious early detection would shift a counter onto the wrong gate, and the
+# consequence of being wrong is flying blind at a gate that was never surveyed.
+BLIND_PASS_TAG_IDS = {35, 0, 36, 34}     # Gate 1: T, L, B, R
+
+
+# ===========================================================================
+# GATE PASS-THROUGH -- the crossing commit
 # ===========================================================================
 # The gate structure is WHITE, so from close range it lights up the downward
 # camera's bright mask and the line fit starts tracking the gate instead of the
@@ -287,9 +329,11 @@ GATE_REBASELINE     = True   # after passing a gate, treat the new altitude as t
 # pitch at the altitude the gate implied, and only re-opens its eyes once it is
 # clear on the far side.
 #
-# This replaces final_demo3's altitude "latch". Same trigger, same frozen
-# altitude, but it now owns pitch/roll/yaw too, and there is ONE entry and ONE
-# exit instead of two that could disagree about when the gate was passed.
+# This applies ONLY to the gates in BLIND_PASS_TAG_IDS. Every other gate is flown
+# exactly as final_demo3 flies it -- line following the whole way, with the
+# altitude latch above taking over the vertical axis on approach. The blind commit
+# fires at 1.80 m, before the latch's 1.50 m, so at a blind gate the latch simply
+# never engages and there is no ambiguity about who owns the vertical axis.
 
 GATE_COMMIT_DIST_M   = 1.80  # m. Range at which line following is abandoned.
                              # NOTE: obs.dist_m is derived from tag pixel size via
@@ -326,9 +370,6 @@ GATE_PASS_FALLBACK_MPS = 0.25 # m/s assumed if get_linear_velocity() is unusable
 GATE_PASS_ALIGN_KP       = 0.35  # roll per unit of normalised horizontal error
 GATE_PASS_MAX_ROLL       = 0.20  # cap on that roll
 GATE_PASS_ALIGN_MIN_CONF = 0.55  # below this the horizontal estimate is ignored
-
-GATE_RECOMMIT_S     = 1.00   # s cooldown after a pass ends, so the gate the drone
-                             # just flew through cannot immediately re-trigger
 
 
 # ===========================================================================
@@ -436,10 +477,12 @@ _gate_streak = 0            # consecutive frames with a usable gate
 _gate_seen_t = 1.0e9        # s since a gate last decoded
 _last_obs = None            # last good GateObs, to coast through dropped frames
 _gate_blend = 0.0           # 0 = pure line throttle, 1 = pure gate throttle
-_gate_target_alt = None     # absolute altitude frozen at the commit
-_recommit_t = 1.0e9         # s since the last pass ended (cooldown)
+_gate_latched = False       # final_demo3's altitude latch (non-blind gates)
+_gate_target_alt = None     # absolute altitude frozen by a latch or a commit
+_gate_latch_t = 0.0         # s since the latch engaged
+_relatch_t = 1.0e9          # s since the last latch/crossing ended (cooldown)
 
-_passing = False            # flying blind through a gate: line following is OFF
+_passing = False            # flying a BLIND crossing: line following is OFF
 _pass_t = 0.0               # s since the commit
 _pass_dist = 0.0            # m travelled since the commit (velocity-integrated)
 _pass_need_m = 0.0          # m of travel required to be clear
@@ -458,7 +501,7 @@ def reset():
     global _timer, _done, _state, _base_alt, _visible, _vis_timer, _last_alt
     global _prev_y0, _m_filt, _m_valid
     global _gate_streak, _gate_seen_t, _gate_blend, _last_obs
-    global _gate_target_alt, _recommit_t, _dbg_t
+    global _gate_latched, _gate_target_alt, _gate_latch_t, _relatch_t, _dbg_t
     global _passing, _pass_t, _pass_dist, _pass_need_m, _pass_by_vel
     _timer = 0.0
     _done = False
@@ -474,8 +517,10 @@ def reset():
     _gate_seen_t = 1.0e9
     _last_obs = None
     _gate_blend = 0.0
+    _gate_latched = False
     _gate_target_alt = None
-    _recommit_t = 1.0e9
+    _gate_latch_t = 0.0
+    _relatch_t = 1.0e9
     _passing = False
     _pass_t = 0.0
     _pass_dist = 0.0
@@ -940,48 +985,124 @@ def line_throttle(alt):
 
 def gate_throttle(obs, alt, dt):
     """
-    Vertical command that centres the gate opening on APPROACH, while the drone
-    is still far enough out to be line following.
+    Vertical command that centres the gate opening. final_demo3's version,
+    unchanged -- this is what flies every gate that is not in BLIND_PASS_TAG_IDS.
 
-    Image-space PID on the normalised vertical error, authority scaled by the
-    estimate's confidence. Close in this stops being used at all: _commit_pass
-    freezes an absolute altitude and flies it, because every tag leaves the frame
-    during the pass and image-space control has nothing left to servo on exactly
-    when it matters most.
+    Two regimes:
+      FAR   -- image-space PID on the normalised vertical error, authority scaled
+               by the estimate's confidence. This is what raises or lowers the
+               drone onto each gate's height on approach, every gate, every lap.
+      CLOSE -- the target is converted to an ABSOLUTE altitude and latched. Every
+               tag leaves the frame during the pass, so image-space control has
+               nothing to servo on exactly when it matters; without the latch the
+               drone reverts to the line FSM mid-gate.
+
+    At a blind gate this is never reached: the commit fires at 1.80 m, outside the
+    latch's 1.50 m, and update() stops calling this once _passing is set.
 
     Returns (throttle, active).
     """
+    global _gate_latched, _gate_target_alt, _gate_latch_t, _relatch_t
+
+    # ---- Latched: fly the frozen absolute altitude.
+    if _gate_latched and _gate_target_alt is not None:
+        _gate_latch_t += dt
+        if _gate_latch_t > GATE_LATCH_MAX_S or (
+                obs is None and _gate_seen_t > GATE_LATCH_EXIT_S):
+            _release_latch(alt)
+            return 0.0, False
+        err_m = _gate_target_alt - alt
+        return uav_utils.clamp(GATE_ALT_HOLD_KP * err_m,
+                               -GATE_THROTTLE_LIMIT, GATE_THROTTLE_LIMIT), True
+
+    _relatch_t += dt
+
     if obs is None or obs.conf < GATE_CONF_MIN or _gate_streak < GATE_MIN_FRAMES:
         _gate_alt_pid.hold()
         return 0.0, False
 
     half_h = max(obs.img_h * 0.5, 1.0)
     err_px = obs.cy - half_h                    # +ve: gate low in frame -> descend
+
+    # ---- Close enough that the tags are about to leave frame: latch.
+    if (obs.dist_m is not None and obs.dist_m <= GATE_LATCH_DIST_M
+            and obs.conf >= GATE_LATCH_MIN_CONF and _relatch_t >= GATE_RELATCH_S):
+        f_px = _focal_px(obs.img_w)
+        rise_m = -err_px * obs.dist_m / f_px    # rows increase downward
+        rise_m = uav_utils.clamp(rise_m, -GATE_MAX_ALT_STEP_M, GATE_MAX_ALT_STEP_M)
+        _gate_latched = True
+        _gate_latch_t = 0.0
+        _gate_target_alt = alt + rise_m
+        _gate_alt_pid.hold()
+        print(f"[gate] latched: dist={obs.dist_m:.2f}m rise={rise_m:+.2f}m "
+              f"target_alt={_gate_target_alt:.2f}m conf={obs.conf:.2f}")
+        err_m = _gate_target_alt - alt
+        return uav_utils.clamp(GATE_ALT_HOLD_KP * err_m,
+                               -GATE_THROTTLE_LIMIT, GATE_THROTTLE_LIMIT), True
+
+    # ---- Far: image-space centring, authority scaled by confidence.
     out = _gate_alt_pid.update(-err_px / half_h, dt)
     return out * obs.conf, True
+
+
+def _release_latch(alt):
+    """
+    End a latched gate pass. Re-baselines the search FSM to the altitude the gate
+    put us at -- essential on a course where gates sit at different heights,
+    otherwise a later line loss descends all the way back to launch height.
+    """
+    global _gate_latched, _gate_target_alt, _gate_latch_t, _base_alt, _relatch_t
+    _gate_latched = False
+    _gate_target_alt = None
+    _gate_latch_t = 0.0
+    _relatch_t = 0.0
+    if GATE_REBASELINE:
+        _base_alt = alt
+        print(f"[gate] passed; reference height re-baselined to {alt:.2f} m")
 
 
 # ---------------------------------------------------------------------------
 # The blind pass
 # ---------------------------------------------------------------------------
+def _gate_is_blind(obs):
+    """
+    True when the gate in frame is one of the gates flown with line following OFF.
+
+    Any decoded tag from a listed gate is enough. Requiring all four would fail at
+    exactly the range where the commit happens -- the outer tags are the first to
+    leave the frame on approach, which is what makes the crossing blind in the
+    first place.
+    """
+    return bool(BLIND_PASS_TAG_IDS) and any(t in BLIND_PASS_TAG_IDS for t in obs.ids)
+
+
 def _should_commit(obs):
-    """True when the gate is close and trustworthy enough to fly blind at."""
+    """
+    True when a BLIND gate is close and trustworthy enough to commit to.
+
+    _gate_is_blind is what keeps every other gate on final_demo3's path: without
+    a match here the commit never fires, _passing stays False, and the gate is
+    flown by line following with gate_throttle's latch, exactly as in demo3.
+    """
     return (not _passing
             and obs is not None
+            and _gate_is_blind(obs)
             and obs.dist_m is not None
             and obs.dist_m <= GATE_COMMIT_DIST_M
             and obs.conf >= GATE_COMMIT_MIN_CONF
             and _gate_streak >= GATE_MIN_FRAMES
-            and _recommit_t >= GATE_RECOMMIT_S)
+            and _relatch_t >= GATE_RELATCH_S)
 
 
 def _commit_pass(drone, obs, alt):
     """
-    Abandon line following and fly through the gate.
+    Abandon line following and fly blind through a gate. Only ever reached for a
+    gate in BLIND_PASS_TAG_IDS.
 
-    Freezes the altitude the gate implies (the old latch computation, unchanged)
-    and records how far the drone has to travel to be clear: the measured range to
-    the gate plane plus GATE_PASS_CLEAR_M.
+    Freezes the altitude the gate implies -- the same computation the latch in
+    gate_throttle does, just triggered 0.30 m earlier -- and records how far the
+    drone has to travel to be clear: the measured range to the gate plane plus
+    GATE_PASS_CLEAR_M.
 
     Note the altitude step is independent of the camera FOV. rise_m is
     -err_px * dist_m / f_px and dist_m is TAG_SIZE * f_px / tag_px, so f_px
@@ -990,13 +1111,14 @@ def _commit_pass(drone, obs, alt):
     for.
     """
     global _passing, _pass_t, _pass_dist, _pass_need_m, _pass_by_vel
-    global _gate_target_alt
+    global _gate_target_alt, _gate_latched
 
     f_px = _focal_px(obs.img_w)
     err_px = obs.cy - max(obs.img_h * 0.5, 1.0)
     rise_m = uav_utils.clamp(-err_px * obs.dist_m / f_px,
                              -GATE_MAX_ALT_STEP_M, GATE_MAX_ALT_STEP_M)
     _gate_target_alt = alt + rise_m
+    _gate_latched = False       # the blind crossing owns the vertical axis now
     _gate_alt_pid.hold()
 
     _passing = True
@@ -1014,9 +1136,9 @@ def _commit_pass(drone, obs, alt):
         pass
 
     src = "velocity" if _pass_by_vel else f"dead reckoning @{GATE_PASS_FALLBACK_MPS}m/s"
-    print(f"[gate] COMMIT at {obs.dist_m:.2f}m conf={obs.conf:.2f}: line following "
-          f"OFF, flying {_pass_need_m:.2f}m forward on {src}, "
-          f"alt target {_gate_target_alt:.2f}m (rise {rise_m:+.2f}m)")
+    print(f"[gate] BLIND COMMIT at {obs.dist_m:.2f}m conf={obs.conf:.2f} "
+          f"ids={obs.ids}: line following OFF, crossing {_pass_need_m:.2f}m on "
+          f"{src}, alt target {_gate_target_alt:.2f}m (rise {rise_m:+.2f}m)")
 
 
 def _pass_progress(drone, dt):
@@ -1040,47 +1162,46 @@ def _pass_progress(drone, dt):
     return _pass_dist
 
 
-def _pass_command(obs, alt):
-    """
-    The command flown during a pass: fixed forward pitch, frozen heading, altitude
-    held on the value latched at the commit, and a lateral trim onto the opening
-    while tags still decode.
+def _pass_throttle(alt):
+    """Hold the altitude frozen at the commit. Used by BOTH crossing modes."""
+    if _gate_target_alt is None:
+        return 0.0
+    return uav_utils.clamp(GATE_ALT_HOLD_KP * (_gate_target_alt - alt),
+                           -GATE_THROTTLE_LIMIT, GATE_THROTTLE_LIMIT)
 
-    Yaw is held at zero deliberately. Rotating mid-pass would change where
+
+def _pass_attitude(obs):
+    """
+    The blind attitude: fixed forward pitch, frozen heading, and a lateral trim
+    onto the opening while tags still decode.
+
+    Yaw is held at zero deliberately. Rotating mid-crossing would change where
     "forward" points, and dead reckoning down a straight line is the only thing
     keeping track of where the drone is.
     """
-    pitch = GATE_PASS_PITCH
-    yaw = 0.0
-
     roll = 0.0
     if obs is not None and GATE_PASS_ALIGN_KP > 0.0 and obs.conf_x >= GATE_PASS_ALIGN_MIN_CONF:
         half_w = max(obs.img_w * 0.5, 1.0)
         err = uav_utils.clamp((obs.cx - half_w) / half_w, -1.0, 1.0)
         roll = uav_utils.clamp(GATE_PASS_ALIGN_KP * err * obs.conf_x,
                                -GATE_PASS_MAX_ROLL, GATE_PASS_MAX_ROLL)
-
-    throttle = 0.0
-    if _gate_target_alt is not None:
-        throttle = uav_utils.clamp(GATE_ALT_HOLD_KP * (_gate_target_alt - alt),
-                                   -GATE_THROTTLE_LIMIT, GATE_THROTTLE_LIMIT)
-    return pitch, roll, yaw, throttle
+    return GATE_PASS_PITCH, roll, 0.0
 
 
 def _end_pass(alt, why):
     """
-    Re-open the drone's eyes on the far side of the gate.
+    Re-open the drone's eyes on the far side of a blind gate.
 
     The line has been ignored for several metres, so every piece of line state is
     started clean: a stale tangent point or slope from before the gate would be
     meaningless now, and the visibility timers must not resume mid-count and fire
     a search climb the instant following resumes.
 
-    Also re-baselines the search FSM to the altitude the gate put us at -- without
-    it, a later line loss descends all the way back to launch height.
+    Re-baselines the search FSM to the altitude the gate put us at, the same as
+    _release_latch does for a non-blind gate.
     """
-    global _passing, _pass_t, _pass_dist, _pass_need_m, _gate_target_alt
-    global _recommit_t, _base_alt, _state, _visible, _vis_timer
+    global _passing, _pass_t, _pass_dist, _pass_need_m
+    global _gate_target_alt, _relatch_t, _base_alt, _state, _visible, _vis_timer
     global _prev_y0, _m_valid
 
     _passing = False
@@ -1088,21 +1209,20 @@ def _end_pass(alt, why):
     _pass_dist = 0.0
     _pass_need_m = 0.0
     _gate_target_alt = None
-    _recommit_t = 0.0
+    _relatch_t = 0.0
+    _gate_alt_pid.hold()
 
     _prev_y0 = None
     _m_valid = False
     _yaw_pid.hold()
     _roll_pid.hold()
-    _gate_alt_pid.hold()
-
     _state = FOLLOWING
     _visible = True
     _vis_timer = 0.0
 
     if GATE_REBASELINE:
         _base_alt = alt
-    print(f"[gate] pass complete ({why}); line following ON at {alt:.2f} m")
+    print(f"[gate] blind crossing complete ({why}); line following ON at {alt:.2f} m")
 
 
 # ===========================================================================
@@ -1111,7 +1231,7 @@ def _end_pass(alt, why):
 def update(drone):
     global _timer, _done, _gate_streak, _gate_seen_t, _gate_blend, _dbg_t
     global _prev_y0, _m_valid, _base_alt, _last_obs, _last_alt
-    global _pass_t, _recommit_t
+    global _pass_t
 
     if _done:
         return True
@@ -1120,9 +1240,9 @@ def update(drone):
     # derivative spike into every axis at once.
     dt = uav_utils.clamp(float(drone.get_delta_time()), DT_MIN, DT_MAX)
 
-    # ---- Line perception. Skipped entirely during a pass: the white gate fills
-    #      the bright mask, so the fit would be tracking the gate, and every
-    #      filter it touched would have to be thrown away at the far side anyway.
+    # ---- Line perception. Skipped only during a blind crossing: there the white
+    #      gate fills the bright mask, so the fit would be tracking the gate, and
+    #      every filter it touched would be thrown away at the far side anyway.
     fit = None
     if not _passing:
         fit = find_edge(drone, dt)
@@ -1192,16 +1312,18 @@ def update(drone):
             # ended after ~1.5m of travel -- see the GATE_PASS_PITCH note.
             _end_pass(alt, f"{GATE_PASS_SECONDS:.1f}s timeout at {travelled:.2f}m "
                            f"of {_pass_need_m:.2f}m")
-    else:
-        _recommit_t += dt
-        if _should_commit(obs):
-            _commit_pass(drone, obs, alt)
+    elif _should_commit(obs):
+        # Only ever true for a gate in BLIND_PASS_TAG_IDS. Every other gate falls
+        # through to the demo3 path below, where gate_throttle's latch handles the
+        # crossing and line following never stops. (_relatch_t is advanced inside
+        # gate_throttle, as in demo3.)
+        _commit_pass(drone, obs, alt)
 
     if was_passing and not _passing:
-        # The pass ended on THIS frame. Perception was skipped at the top of the
-        # frame, so take a real look now -- otherwise the visibility tracker below
-        # reads "we didn't look" as "the line is gone" and starts counting down
-        # toward a search climb on the one frame it should be reacquiring.
+        # A blind crossing ended on THIS frame. Perception was skipped at the top
+        # of the frame, so take a real look now -- otherwise the visibility tracker
+        # below reads "we didn't look" as "the line is gone" and starts counting
+        # down toward a search climb on the one frame it should be reacquiring.
         fit = find_edge(drone, dt)
         if fit is None:
             _prev_y0 = None
@@ -1211,12 +1333,13 @@ def update(drone):
     m = 0.0
     edge_col = float(IMAGE_CENTER)
     if _passing:
-        # The gate owns EVERY axis. This is the whole point of the manoeuvre: the
-        # line is not trustworthy this close to a white gate, so it is not
-        # consulted at all. The line FSM is frozen too -- _track_line_visibility
-        # is not called, so its timers cannot run down and strand the drone in
-        # SEARCHING on the far side.
-        pitch, roll, yaw, throttle = _pass_command(obs, alt)
+        # Blind crossing (gate 1 only): the gate owns EVERY axis. The line is not
+        # trustworthy this close to a white gate, so it is not consulted at all.
+        # The line FSM is frozen too -- _track_line_visibility is not called, so
+        # its timers cannot run down and strand the drone in SEARCHING on the far
+        # side.
+        pitch, roll, yaw = _pass_attitude(obs)
+        throttle = _pass_throttle(alt)
         _gate_blend = 1.0
     else:
         # ---- Throttle: BOTH sources every frame, cross-faded.
@@ -1250,7 +1373,7 @@ def update(drone):
     if DEBUG_PRINT and _dbg_t >= DEBUG_PERIOD_S:
         _dbg_t = 0.0
         if _passing:
-            line_s = "line=OFF(pass)"
+            line_s = "line=OFF(blind)"
         elif fit is None:
             line_s = "line=LOST"
         else:
@@ -1261,9 +1384,10 @@ def update(drone):
         else:
             d = f"{obs.dist_m:.2f}m" if obs.dist_m is not None else "?"
             gate_s = (f"gate n={obs.count} conf={obs.conf:.2f}/{obs.conf_x:.2f} "
-                      f"cy={obs.cy:.0f} cx={obs.cx:.0f} d={d}")
+                      f"cy={obs.cy:.0f} cx={obs.cx:.0f} d={d}"
+                      f"{' LATCH' if _gate_latched else ''}")
         if _passing:
-            gate_s += (f" PASS {_pass_t:.1f}/{GATE_PASS_SECONDS:.1f}s "
+            gate_s += (f" BLIND {_pass_t:.1f}/{GATE_PASS_SECONDS:.1f}s "
                        f"{_pass_dist:.2f}/{_pass_need_m:.2f}m")
         print(f"{line_s} | {gate_s} | P={pitch:+.3f} R={roll:+.3f} "
               f"Y={yaw:+.3f} T={throttle:+.3f} (blend={_gate_blend:.2f}) "
@@ -1285,12 +1409,15 @@ if __name__ == "__main__":
     def start():
         _launcher.reset()
         reset()
-        print("final_demo4: filtered-tangent line following + blind gate pass-through")
+        print("final_demo5: line following + blind crossing at gate 1 only")
         print(f"  aruco={GATE_ARUCO_DICT}  h_per_tag={GATE_H_PER_TAG:.2f}  "
               f"focal={_focal_px(IMG_W):.0f}px")
-        print(f"  commit at {GATE_COMMIT_DIST_M:.2f}m -> fly "
-              f"{GATE_COMMIT_DIST_M + GATE_PASS_CLEAR_M:.2f}m blind at pitch "
+        print(f"  commit at {GATE_COMMIT_DIST_M:.2f}m -> cross "
+              f"{GATE_COMMIT_DIST_M + GATE_PASS_CLEAR_M:.2f}m at pitch "
               f"{GATE_PASS_PITCH:.2f}, capped at {GATE_PASS_SECONDS:.1f}s")
+        print(f"  blind (line following OFF) at tag ids "
+              f"{sorted(BLIND_PASS_TAG_IDS) if BLIND_PASS_TAG_IDS else '(none)'}; "
+              f"every other gate keeps line following")
         if not GATE_TAG_ROLE_BY_ID:
             print("  tag roles: learning online (fill GATE_TAG_ROLE_BY_ID to skip)")
 

@@ -116,7 +116,7 @@ MAX_ROLL      = 0.25     # strafe authority for centring
 MAX_YAW       = 1.0      # yaw authority
 IMAGE_CENTER  = 320      # 640-wide image -> centre column
 
-PITCH_STRAIGHT = 0.15    # fast on straights
+PITCH_STRAIGHT = 0.20    # fast on straights
 PITCH_TURN     = 0.08    # slow through turns
 CURVE_SCALE    = 70      # residual std at which you're "fully" in a turn (TUNE)
 

@@ -194,7 +194,7 @@ D_TAU         = 0.10     # s, derivative low-pass. Raw d/dt of a pixel
                          # measurement is unusable without this.
 
 # Pitch (open-loop speed schedule)
-PITCH_STRAIGHT  = 0.15   # straights
+PITCH_STRAIGHT  = 0.20   # straights
 PITCH_TURN      = 0.08   # turns
 BEND_SCALE_RAD  = 1.0    # total tangent-angle change across the visible curve at
                          # which the drone is "fully" in a turn. 1.0 rad ~ 57 deg.
@@ -223,13 +223,16 @@ HEIGHT_TOL       = 0.10  # m; "back at the reference height"
 # from them further down, so once these are right the behaviour thresholds are
 # expressed in metres and stop needing to be re-tuned when the course changes.
 
-GATE_INNER_HEIGHT_M = 1.80   # m, vertical clear opening (inside edge to inside
+GATE_INNER_HEIGHT_M = 1.524  # m, vertical clear opening (inside edge to inside
                              # edge). Used for the tag<->centre offset and for
                              # the pass-clearance sanity check.
-GATE_INNER_WIDTH_M  = 1.80   # m, horizontal clear opening. Only used for the
+                             # (60 in diameter hoop -> 60 * 0.0254 = 1.524 m)
+GATE_INNER_WIDTH_M  = 1.524  # m, horizontal clear opening. Only used for the
                              # aspect-ratio sanity check on role assignment.
-GATE_TAG_SIZE_M     = 0.20   # m, side length of the printed ArUco square
+                             # Hoop is circular, so width == height == diameter.
+GATE_TAG_SIZE_M     = 0.2667 # m, side length of the printed ArUco square
                              # (black border included, quiet zone excluded).
+                             # (10.5 in tag side -> 10.5 * 0.0254 = 0.2667 m)
 
 # Where the tags sit on the gate. The course gates carry FOUR tags at the
 # MIDPOINT of each edge -- top, bottom, left, right -- forming a diamond.
@@ -254,7 +257,16 @@ GATE_H_PER_TAG = (_GATE_H_PER_TAG_OVERRIDE if _GATE_H_PER_TAG_OVERRIDE is not No
 # fill this in and role resolution becomes exact even on single-tag frames.
 # Leave empty to learn roles online from 3+ tag views.
 #   e.g. {0: 'T', 1: 'R', 2: 'B', 3: 'L',  4: 'T', 5: 'R', 6: 'B', 7: 'L'}
-GATE_TAG_ROLE_BY_ID = {}
+GATE_TAG_ROLE_BY_ID = {
+    # Gate 1
+    35: 'T', 0:  'L', 36: 'B', 34: 'R',
+    # Gate 2
+    41: 'T', 40: 'L', 44: 'B', 42: 'R',
+    # Gate 3
+    46: 'T', 47: 'L', 43: 'B', 45: 'R',
+    # Gate 4
+    39: 'T', 76: 'L', 37: 'B', 38: 'R',
+}
 
 # ArUco dictionary. neo_lab's docstring says DICT_6X6_250 but its code uses
 # DICT_5X5_100 -- they cannot both be right. VERIFY THIS FIRST: if it is wrong

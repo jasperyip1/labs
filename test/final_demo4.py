@@ -304,19 +304,25 @@ GATE_COMMIT_MIN_CONF = 0.90  # min gate confidence to commit. Defaults to the
                              # for one uncalibrated constant on a blind manoeuvre.
 GATE_PASS_CLEAR_M    = 1.00  # m past the gate plane before line following resumes
 
-GATE_PASS_PITCH      = PITCH_STRAIGHT   # forward command held through the pass.
-                             # On the real drone send_pcmd pitch maps to
-                             # pitch * MAX_SPEED m/s with MAX_SPEED = 1.0
-                             # (flight_real.py:29), so 0.22 is 0.22 m/s and the
-                             # 2.80 m crossing takes ~12.7 s. That is slow but it
-                             # is CORRECT: the pass ends on distance covered, so a
-                             # low pitch only makes the crossing longer, never
-                             # shorter than the gate. Raise it to fly through
-                             # faster, not to make the exit work.
-GATE_PASS_FALLBACK_MPS = 0.25 # m/s assumed if get_linear_velocity() is unusable.
-                             # This is the ONLY thing that guarantees the crossing
-                             # terminates when there is no velocity source, so it
-                             # must not be zero.
+GATE_PASS_SPEED_SCALE = 1.0  # m/s per unit of pitch/roll command. This is
+                             # MAX_SPEED on the real drone (flight_real.py:29).
+                             # The sim's send_pcmd is a tilt command and flies
+                             # faster, so on sim every estimate below is
+                             # conservative rather than optimistic.
+
+GATE_PASS_PITCH      = 0.25  # forward command held through the pass -> 0.25 m/s
+                             # on the real drone, so the 2.80 m crossing takes
+                             # ~11.2 s. Faster is better here: dead reckoning error
+                             # accumulates with TIME, so the less time spent blind
+                             # the less the drone can drift off the gate centre.
+                             # The pass ends on distance covered, so raising this
+                             # shortens the crossing without risking a short exit.
+GATE_PASS_FALLBACK_MPS = GATE_PASS_PITCH * GATE_PASS_SPEED_SCALE
+                             # m/s assumed if get_linear_velocity() is unusable.
+                             # Derived from the commanded pitch so it stays honest
+                             # when that is tuned. This is the ONLY thing that
+                             # guarantees the crossing terminates when there is no
+                             # velocity source, so it must not be zero.
 
 # -- Timeout: a BACKSTOP, not the exit condition ----------------------------
 # The crossing normally ends on dead-reckoned distance. This exists for one
@@ -333,24 +339,40 @@ GATE_PASS_FALLBACK_MPS = 0.25 # m/s assumed if get_linear_velocity() is unusable
 # what made a flat 7 s wrong. Firing LATE just means a few more seconds of blind
 # flight in a case where the sensors are already lying. So: err long.
 #
-# At the defaults -- 2.80 m at pitch 0.22 -> ~12.7 s expected -- this gives a
-# 25.5 s backstop. Raise GATE_PASS_PITCH to 0.40 and it becomes 14 s. The value
+# At the defaults -- 2.80 m at pitch 0.25 -> ~11.2 s expected -- this gives a
+# 22.4 s backstop. Raise GATE_PASS_PITCH to 0.40 and it becomes 14 s. The value
 # actually used is printed at every commit.
-GATE_PASS_SPEED_SCALE    = 1.0   # m/s per unit of pitch command. This is
-                                 # MAX_SPEED on the real drone (flight_real.py:29).
-                                 # The sim's send_pcmd is a tilt command and flies
-                                 # faster, so there the backstop is only ever more
-                                 # generous than needed.
 GATE_PASS_TIMEOUT_FACTOR = 2.0   # multiple of the expected crossing time
 GATE_PASS_TIMEOUT_MIN_S  = 8.0   # never shorter than this
 GATE_PASS_TIMEOUT_MAX_S  = 30.0  # never longer than this
 
-# Lateral trim during the pass. The drone strafes to keep the gate opening
-# centred while tags are still decoding, then holds zero once they leave frame.
-# Set GATE_PASS_ALIGN_KP = 0.0 to fly the pass on pure dead reckoning.
-GATE_PASS_ALIGN_KP       = 0.35  # roll per unit of normalised horizontal error
-GATE_PASS_MAX_ROLL       = 0.20  # cap on that roll
+# -- Lateral centring: the gate steers the crossing ------------------------
+# The point of this block is that the drone must go through the MIDDLE of the
+# opening, not merely somewhere through it.
+#
+# The offset is tracked in METRES, not image pixels, and that is what makes it
+# survive the part of the crossing where it matters. Tags do not stay in frame:
+# with an 82 deg HFOV the left/right tags leave at about 0.88 m range and the
+# top/bottom pair at about 1.17 m, so on a 1.80 m commit roughly the last 1.9 m of
+# the 2.80 m crossing has NO gate in view at all. Image-space trim goes to zero
+# exactly there -- inside the tunnel, where being off-centre is what clips a hoop.
+#
+# So: while the gate is visible the offset is measured from it directly; once it
+# is not, the offset keeps being closed by integrating sideways velocity, the same
+# dead reckoning used for forward progress. Yaw is frozen during the pass, so the
+# body frame does not rotate and a metric offset stays meaningful.
+GATE_PASS_ALIGN_KP_M     = 0.60  # roll per METRE of remaining lateral offset.
+                                 # On the real drone roll maps to m/s, so this is a
+                                 # 1/0.60 = 1.7 s time constant on closing the
+                                 # offset -- about 6 time constants inside an
+                                 # 11 s crossing. Set to 0.0 to fly the crossing on
+                                 # forward dead reckoning alone.
+GATE_PASS_MAX_ROLL       = 0.20  # cap on that roll -> 0.20 m/s of strafe
 GATE_PASS_ALIGN_MIN_CONF = 0.55  # below this the horizontal estimate is ignored
+GATE_PASS_MAX_LAT_M      = 0.75  # m. Cap on the tracked offset, ~the gate's half
+                                 # width: further out than this the estimate is
+                                 # more likely wrong than the drone is misplaced,
+                                 # and a huge commanded strafe is the worse error.
 
 GATE_RECOMMIT_S     = 1.00   # s cooldown after a pass ends, so the gate the drone
                              # just flew through cannot immediately re-trigger
@@ -470,6 +492,8 @@ _pass_dist = 0.0            # m travelled since the commit (velocity-integrated)
 _pass_need_m = 0.0          # m of travel required to be clear
 _pass_by_vel = False        # True if get_linear_velocity() is usable this pass
 _pass_timeout_s = 0.0       # derived backstop for the current crossing
+_pass_lat_m = 0.0           # m the drone must still move RIGHT to be centred
+_pass_lat_valid = False     # True once a gate has given us a lateral offset
 
 _dbg_t = 0.0
 
@@ -486,6 +510,7 @@ def reset():
     global _gate_streak, _gate_seen_t, _gate_blend, _last_obs
     global _gate_target_alt, _recommit_t, _dbg_t
     global _passing, _pass_t, _pass_dist, _pass_need_m, _pass_by_vel, _pass_timeout_s
+    global _pass_lat_m, _pass_lat_valid
     _timer = 0.0
     _done = False
     _state = FOLLOWING
@@ -508,6 +533,8 @@ def reset():
     _pass_need_m = 0.0
     _pass_by_vel = False
     _pass_timeout_s = 0.0
+    _pass_lat_m = 0.0
+    _pass_lat_valid = False
     _dbg_t = 0.0
     _yaw_pid.reset()
     _roll_pid.reset()
@@ -1017,7 +1044,7 @@ def _commit_pass(drone, obs, alt):
     for.
     """
     global _passing, _pass_t, _pass_dist, _pass_need_m, _pass_by_vel
-    global _gate_target_alt, _pass_timeout_s
+    global _gate_target_alt, _pass_timeout_s, _pass_lat_m, _pass_lat_valid
 
     f_px = _focal_px(obs.img_w)
     err_px = obs.cy - max(obs.img_h * 0.5, 1.0)
@@ -1053,11 +1080,17 @@ def _commit_pass(drone, obs, alt):
     except Exception:
         pass
 
+    # Seed the lateral offset from the observation we are committing on, so the
+    # very first frame of the crossing already strafes toward the centre.
+    seed = _lateral_offset_m(obs)
+    _pass_lat_m = seed if seed is not None else 0.0
+    _pass_lat_valid = seed is not None
+
     src = "velocity" if _pass_by_vel else f"dead reckoning @{GATE_PASS_FALLBACK_MPS}m/s"
     print(f"[gate] COMMIT at {obs.dist_m:.2f}m conf={obs.conf:.2f}: line following "
           f"OFF, flying {_pass_need_m:.2f}m forward on {src}, "
           f"alt target {_gate_target_alt:.2f}m (rise {rise_m:+.2f}m), "
-          f"backstop {_pass_timeout_s:.0f}s")
+          f"backstop {_pass_timeout_s:.0f}s, lateral {_pass_lat_m:+.2f}m")
 
 
 def _pass_progress(drone, dt):
@@ -1081,31 +1114,75 @@ def _pass_progress(drone, dt):
     return _pass_dist
 
 
-def _pass_command(obs, alt):
+def _lateral_offset_m(obs):
+    """
+    Metres the drone must still move RIGHT to be centred on the opening, measured
+    from the gate. None when the estimate is not trustworthy.
+
+    obs.cx is the reconstructed centre of the OPENING (see _estimate_center_col),
+    not the centroid of whatever tags happened to decode -- which matters here,
+    because a lone left tag read naively would point the drone at the left edge.
+    """
+    if obs is None or obs.dist_m is None or obs.conf_x < GATE_PASS_ALIGN_MIN_CONF:
+        return None
+    f_px = _focal_px(obs.img_w)
+    if f_px <= 1e-6:
+        return None
+    off = (obs.cx - obs.img_w * 0.5) * obs.dist_m / f_px
+    if not math.isfinite(off):
+        return None
+    return uav_utils.clamp(off, -GATE_PASS_MAX_LAT_M, GATE_PASS_MAX_LAT_M)
+
+
+def _pass_command(drone, obs, alt, dt):
     """
     The command flown during a pass: fixed forward pitch, frozen heading, altitude
-    held on the value latched at the commit, and a lateral trim onto the opening
-    while tags still decode.
+    held on the value frozen at the commit, and a lateral offset driven to zero so
+    the drone crosses through the MIDDLE of the opening.
+
+    The lateral offset is refreshed from the gate whenever it is in view, and dead
+    reckoned by integrating sideways velocity when it is not -- which is most of
+    the crossing, since every tag leaves the frame before the drone reaches the
+    plane. Holding the last image-space trim instead would command a constant
+    strafe forever; zeroing it would abandon centring exactly inside the tunnel.
 
     Yaw is held at zero deliberately. Rotating mid-pass would change where
-    "forward" points, and dead reckoning down a straight line is the only thing
-    keeping track of where the drone is.
+    "forward" points, and both dead reckonings assume a fixed body frame.
     """
-    pitch = GATE_PASS_PITCH
-    yaw = 0.0
+    global _pass_lat_m, _pass_lat_valid
+
+    measured = _lateral_offset_m(obs)
+    if measured is not None:
+        _pass_lat_m = measured              # the gate wins whenever it can be seen
+        _pass_lat_valid = True
+    elif _pass_lat_valid:
+        # No gate in view: keep closing the offset on integrated sideways motion.
+        v_right = None
+        if _pass_by_vel:
+            try:
+                v = float(drone.physics.get_linear_velocity()[0])   # x = right
+                v_right = v if math.isfinite(v) else None
+            except Exception:
+                v_right = None
+        if v_right is None:
+            # No velocity either -- assume the strafe we asked for is achieved,
+            # the same assumption GATE_PASS_FALLBACK_MPS makes forwards.
+            v_right = uav_utils.clamp(GATE_PASS_ALIGN_KP_M * _pass_lat_m,
+                                      -GATE_PASS_MAX_ROLL,
+                                      GATE_PASS_MAX_ROLL) * GATE_PASS_SPEED_SCALE
+        _pass_lat_m = uav_utils.clamp(_pass_lat_m - v_right * dt,
+                                      -GATE_PASS_MAX_LAT_M, GATE_PASS_MAX_LAT_M)
 
     roll = 0.0
-    if obs is not None and GATE_PASS_ALIGN_KP > 0.0 and obs.conf_x >= GATE_PASS_ALIGN_MIN_CONF:
-        half_w = max(obs.img_w * 0.5, 1.0)
-        err = uav_utils.clamp((obs.cx - half_w) / half_w, -1.0, 1.0)
-        roll = uav_utils.clamp(GATE_PASS_ALIGN_KP * err * obs.conf_x,
+    if _pass_lat_valid and GATE_PASS_ALIGN_KP_M > 0.0:
+        roll = uav_utils.clamp(GATE_PASS_ALIGN_KP_M * _pass_lat_m,
                                -GATE_PASS_MAX_ROLL, GATE_PASS_MAX_ROLL)
 
     throttle = 0.0
     if _gate_target_alt is not None:
         throttle = uav_utils.clamp(GATE_ALT_HOLD_KP * (_gate_target_alt - alt),
                                    -GATE_THROTTLE_LIMIT, GATE_THROTTLE_LIMIT)
-    return pitch, roll, yaw, throttle
+    return GATE_PASS_PITCH, roll, 0.0, throttle
 
 
 def _end_pass(alt, why):
@@ -1121,7 +1198,7 @@ def _end_pass(alt, why):
     it, a later line loss descends all the way back to launch height.
     """
     global _passing, _pass_t, _pass_dist, _pass_need_m, _gate_target_alt
-    global _pass_timeout_s
+    global _pass_timeout_s, _pass_lat_m, _pass_lat_valid
     global _recommit_t, _base_alt, _state, _visible, _vis_timer
     global _prev_y0, _m_valid
 
@@ -1130,6 +1207,8 @@ def _end_pass(alt, why):
     _pass_dist = 0.0
     _pass_need_m = 0.0
     _pass_timeout_s = 0.0
+    _pass_lat_m = 0.0
+    _pass_lat_valid = False
     _gate_target_alt = None
     _recommit_t = 0.0
 
@@ -1263,7 +1342,7 @@ def update(drone):
         # consulted at all. The line FSM is frozen too -- _track_line_visibility
         # is not called, so its timers cannot run down and strand the drone in
         # SEARCHING on the far side.
-        pitch, roll, yaw, throttle = _pass_command(obs, alt)
+        pitch, roll, yaw, throttle = _pass_command(drone, obs, alt, dt)
         _gate_blend = 1.0
     else:
         # ---- Throttle: BOTH sources every frame, cross-faded.
@@ -1311,7 +1390,8 @@ def update(drone):
                       f"cy={obs.cy:.0f} cx={obs.cx:.0f} d={d}")
         if _passing:
             gate_s += (f" PASS {_pass_t:.1f}/{_pass_timeout_s:.0f}s "
-                       f"{_pass_dist:.2f}/{_pass_need_m:.2f}m")
+                       f"{_pass_dist:.2f}/{_pass_need_m:.2f}m "
+                       f"lat={_pass_lat_m:+.2f}m")
         print(f"{line_s} | {gate_s} | P={pitch:+.3f} R={roll:+.3f} "
               f"Y={yaw:+.3f} T={throttle:+.3f} (blend={_gate_blend:.2f}) "
               f"{_state} alt={alt:.2f}/{_base_alt:.2f}")

@@ -29,7 +29,7 @@ MAX_YAW       = 1.0     # yaw authority
 FOLLOW_TIME   = 1000000.0     # seconds to follow before landing
 IMAGE_CENTER  = 320      # 640-wide image -> center column
 
-PITCH_STRAIGHT = 0.15    # fast on straights
+PITCH_STRAIGHT = 0.22    # fast on straights
 PITCH_TURN     = 0.08    # slow through turns
 CURVE_SCALE    = 70   # residual std at which you're "fully" in a turn (TUNE)
 
